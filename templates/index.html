@@ -1,0 +1,368 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>HVAC Ad Generator</title>
+  <link rel="stylesheet" href="/static/style.css" />
+</head>
+<body>
+  <div class="container">
+
+    <!-- Google Drive status bar -->
+    <div class="drive-bar {% if connected %}drive-bar--connected{% elif not creds_present %}drive-bar--warn{% else %}drive-bar--disconnected{% endif %}">
+      {% if connected %}
+        <div class="drive-bar__left">
+          <span class="dot dot--green"></span>
+          <span>Google Drive connected</span>
+        </div>
+        <a href="/auth/disconnect" class="drive-bar__action drive-bar__action--muted">Disconnect</a>
+      {% elif not creds_present %}
+        <div class="drive-bar__left">
+          <span class="dot dot--yellow"></span>
+          <span>Google credentials not configured</span>
+        </div>
+      {% else %}
+        <div class="drive-bar__left">
+          <span class="dot dot--gray"></span>
+          <span>Google Drive not connected</span>
+        </div>
+        <a href="/auth/google" class="drive-bar__action">Connect Google Drive</a>
+      {% endif %}
+    </div>
+
+    {% if connected_msg %}
+      <div class="flash flash--success">Google Drive connected successfully.</div>
+    {% endif %}
+    {% if error_msg == "missing_credentials" %}
+      <div class="flash flash--error">Google credentials not found in .env file.</div>
+    {% endif %}
+
+    <header>
+      <h1>HVAC Ad Generator</h1>
+      <p class="subtitle">Fill out the form — we'll build the ads and save them to Drive.</p>
+    </header>
+
+    <form id="adForm">
+
+      <!-- Section: Client Info -->
+      <div class="section-label">Client Info</div>
+
+      <div class="field">
+        <label for="business">Business Name</label>
+        <input type="text" id="business" name="business" placeholder="e.g. Comfort Air Solutions" required />
+      </div>
+
+      <div class="field">
+        <label for="offer">Offer / Ad Copy</label>
+        <textarea id="offer" name="offer" rows="3" placeholder="e.g. $99 AC Tune-Up — Book Before June 30th. Stay cool all summer!" required></textarea>
+      </div>
+
+      <div class="field">
+        <label for="system">HVAC System</label>
+        {% if systems %}
+          <select id="system" name="system" required>
+            <option value="" disabled selected>Select a system...</option>
+            {% for s in systems %}
+              <option value="{{ s.name }}">{{ s.name }}</option>
+            {% endfor %}
+          </select>
+        {% else %}
+          <div class="no-systems">
+            No systems found. Add images to the <code>hvac_systems/</code> folder and restart.
+          </div>
+        {% endif %}
+      </div>
+
+      <div class="field">
+        <label for="location">Location / Call-Out</label>
+        <input type="text" id="location" name="location" placeholder="e.g. Phoenix, AZ — Serving the East Valley" required />
+      </div>
+
+      <!-- Section: Save Location -->
+      <div class="section-label">Save Location</div>
+
+      <div class="field">
+        <label>Google Drive Folder</label>
+
+        <!-- Hidden fields sent with form -->
+        <input type="hidden" id="folder_id"   name="folder_id" />
+        <input type="hidden" id="folder_name" name="folder_name" />
+
+        <div class="folder-picker" id="folderPicker">
+          <div class="folder-search-wrap">
+            <span class="folder-icon">&#128193;</span>
+            <input
+              type="text"
+              id="folderSearch"
+              class="folder-search-input"
+              placeholder="Search your Drive folders..."
+              autocomplete="off"
+            />
+            <button type="button" class="folder-refresh" id="folderRefresh" title="Refresh folders">&#8635;</button>
+          </div>
+
+          <div class="folder-selected" id="folderSelected" hidden>
+            <span class="folder-selected-icon">&#128193;</span>
+            <span id="folderSelectedName"></span>
+            <button type="button" class="folder-clear" id="folderClear">&#10005; Change</button>
+          </div>
+
+          <div class="folder-dropdown" id="folderDropdown" hidden>
+            <div id="folderList"></div>
+          </div>
+
+          <div class="field-hint" id="folderHint">Connect Google Drive first to browse folders</div>
+        </div>
+      </div>
+
+      <!-- Section: Ad Output -->
+      <div class="section-label">Ad Output</div>
+
+      <div class="field">
+        <label for="variants">Variants per Ad Type</label>
+        <select id="variants" name="variants">
+          <option value="1">1 variant</option>
+          <option value="2">2 variants</option>
+          <option value="3">3 variants</option>
+          <option value="4">4 variants</option>
+        </select>
+        <div class="field-hint">How many versions of each ad concept to generate</div>
+      </div>
+
+      <!-- Ad Types / Prompts -->
+      <div class="field">
+        <label>Ad Types <span class="label-count" id="adTypeCount">(1)</span></label>
+        <div class="field-hint" style="margin-bottom:10px">Each type is a different concept or style — all use the same business info above</div>
+        <div id="adTypeList">
+          <div class="ad-type-row" data-index="1">
+            <div class="ad-type-number">1</div>
+            <input type="text" name="ad_prompt_1" placeholder="e.g. Summer cooling deal with bold headline" required />
+            <button type="button" class="btn-remove-ad" onclick="removeAdType(this)" hidden>✕</button>
+          </div>
+        </div>
+        <button type="button" class="btn-add-ad" id="addAdBtn" onclick="addAdType()">+ Add another ad type</button>
+      </div>
+
+      <!-- Total count indicator -->
+      <div class="total-bar">
+        Total: <strong id="totalCount">1</strong> image<span id="totalPlural">s</span> will be generated
+      </div>
+
+      <button type="submit" id="submitBtn" {% if not systems %}disabled{% endif %}>
+        <span class="btn-text">Generate Ads</span>
+        <span class="btn-loader" hidden>Generating... this can take a minute</span>
+      </button>
+    </form>
+
+    <div id="result" hidden>
+      <div class="result-card" id="resultCard"></div>
+    </div>
+    <div id="errorBox" class="error-box" hidden></div>
+  </div>
+
+  <script>
+    // ── Folder picker ────────────────────────────────────────────────────
+    let allFolders = [];
+    const folderSearch   = document.getElementById('folderSearch');
+    const folderDropdown = document.getElementById('folderDropdown');
+    const folderList     = document.getElementById('folderList');
+    const folderSelected = document.getElementById('folderSelected');
+    const folderSelectedName = document.getElementById('folderSelectedName');
+    const folderClear    = document.getElementById('folderClear');
+    const folderRefresh  = document.getElementById('folderRefresh');
+    const folderHint     = document.getElementById('folderHint');
+    const folderIdInput  = document.getElementById('folder_id');
+    const folderNameInput = document.getElementById('folder_name');
+
+    async function loadFolders() {
+      folderHint.textContent = 'Loading folders...';
+      folderHint.hidden = false;
+      try {
+        const res = await fetch('/api/drive/folders');
+        const json = await res.json();
+        if (json.error) throw new Error(json.error);
+        allFolders = json.folders;
+        folderHint.hidden = true;
+        folderSearch.disabled = false;
+        renderFolderList('');
+      } catch (err) {
+        folderHint.textContent = err.message.includes('Not connected')
+          ? 'Connect Google Drive first to browse folders'
+          : 'Failed to load folders: ' + err.message;
+        folderHint.hidden = false;
+      }
+    }
+
+    function renderFolderList(query) {
+      const q = query.toLowerCase();
+      const matches = q
+        ? allFolders.filter(f => f.name.toLowerCase().includes(q))
+        : allFolders;
+
+      if (!matches.length) {
+        folderList.innerHTML = '<div class="folder-empty">No folders found</div>';
+      } else {
+        folderList.innerHTML = matches.slice(0, 80).map(f => `
+          <div class="folder-item" data-id="${f.id}" data-name="${f.name}">
+            <span class="fi">&#128193;</span> ${f.name}
+          </div>`).join('');
+        folderList.querySelectorAll('.folder-item').forEach(el => {
+          el.addEventListener('click', () => selectFolder(el.dataset.id, el.dataset.name));
+        });
+      }
+      folderDropdown.hidden = false;
+    }
+
+    function selectFolder(id, name) {
+      folderIdInput.value   = id;
+      folderNameInput.value = name;
+      folderSelectedName.textContent = name;
+      folderSelected.hidden = false;
+      folderDropdown.hidden = true;
+      folderSearch.value    = '';
+      folderHint.hidden     = true;
+    }
+
+    folderClear.addEventListener('click', () => {
+      folderIdInput.value = '';
+      folderNameInput.value = '';
+      folderSelected.hidden = true;
+      folderSearch.value = '';
+      renderFolderList('');
+    });
+
+    folderSearch.addEventListener('focus', () => {
+      if (allFolders.length) renderFolderList(folderSearch.value);
+    });
+
+    folderSearch.addEventListener('input', () => {
+      if (allFolders.length) renderFolderList(folderSearch.value);
+    });
+
+    folderRefresh.addEventListener('click', () => {
+      allFolders = [];
+      folderSelected.hidden = true;
+      folderDropdown.hidden = true;
+      folderIdInput.value = '';
+      loadFolders();
+    });
+
+    document.addEventListener('click', (e) => {
+      if (!e.target.closest('#folderPicker')) folderDropdown.hidden = true;
+    });
+
+    // Only load if Drive is connected
+    if (document.querySelector('.drive-bar--connected')) {
+      folderSearch.disabled = false;
+      loadFolders();
+    } else {
+      folderSearch.disabled = true;
+    }
+
+    // ── Ad types ────────────────────────────────────────────────────────
+    let adTypeCount = 1;
+
+    function updateTotalCount() {
+      const variants = parseInt(document.getElementById('variants').value) || 1;
+      const types = document.querySelectorAll('.ad-type-row').length;
+      const total = variants * types;
+      document.getElementById('totalCount').textContent = total;
+      document.getElementById('totalPlural').textContent = total === 1 ? '' : 's';
+      document.getElementById('adTypeCount').textContent = `(${types})`;
+    }
+
+    function addAdType() {
+      adTypeCount++;
+      const list = document.getElementById('adTypeList');
+      const row = document.createElement('div');
+      row.className = 'ad-type-row';
+      row.dataset.index = adTypeCount;
+      row.innerHTML = `
+        <div class="ad-type-number">${list.children.length + 1}</div>
+        <input type="text" name="ad_prompt_${adTypeCount}" placeholder="e.g. Emergency service — 24/7 availability" />
+        <button type="button" class="btn-remove-ad" onclick="removeAdType(this)">✕</button>
+      `;
+      list.appendChild(row);
+      updateRemoveButtons();
+      updateTotalCount();
+    }
+
+    function removeAdType(btn) {
+      btn.closest('.ad-type-row').remove();
+      renumberAdTypes();
+      updateRemoveButtons();
+      updateTotalCount();
+    }
+
+    function renumberAdTypes() {
+      document.querySelectorAll('.ad-type-row').forEach((row, i) => {
+        row.querySelector('.ad-type-number').textContent = i + 1;
+        row.querySelector('input').name = `ad_prompt_${i + 1}`;
+      });
+    }
+
+    function updateRemoveButtons() {
+      const rows = document.querySelectorAll('.ad-type-row');
+      rows.forEach(row => {
+        row.querySelector('.btn-remove-ad').hidden = rows.length === 1;
+      });
+    }
+
+    document.getElementById('variants').addEventListener('change', updateTotalCount);
+
+    // Form submit
+    const form = document.getElementById('adForm');
+    const submitBtn = document.getElementById('submitBtn');
+    const btnText = submitBtn.querySelector('.btn-text');
+    const btnLoader = submitBtn.querySelector('.btn-loader');
+    const resultDiv = document.getElementById('result');
+    const resultCard = document.getElementById('resultCard');
+    const errorBox = document.getElementById('errorBox');
+
+    form.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      errorBox.hidden = true;
+      resultDiv.hidden = true;
+      submitBtn.disabled = true;
+      btnText.hidden = true;
+      btnLoader.hidden = false;
+
+      try {
+        const res = await fetch('/generate', { method: 'POST', body: new FormData(form) });
+        const json = await res.json();
+        if (!res.ok || json.error) throw new Error(json.error || 'Unknown error');
+
+        const linksHtml = json.links.map(item => `
+          <a href="${item.url}" target="_blank" class="drive-link">
+            ${item.label} &rarr; Google Drive
+          </a>
+        `).join('');
+
+        const warningsHtml = json.warnings?.length
+          ? `<div class="warnings">${json.warnings.map(w => `<p>⚠ ${w}</p>`).join('')}</div>`
+          : '';
+
+        resultCard.innerHTML = `
+          <div class="result-success">
+            <div class="check">&#10003;</div>
+            <h2>${json.count} ad${json.count !== 1 ? 's' : ''} created for <em>${json.business}</em></h2>
+            <p>Saved to <strong>MarketingImages / ${json.business} / ${json.folder}</strong></p>
+            ${warningsHtml}
+            <div class="links">${linksHtml}</div>
+          </div>`;
+        resultDiv.hidden = false;
+      } catch (err) {
+        errorBox.textContent = err.message;
+        errorBox.hidden = false;
+      } finally {
+        submitBtn.disabled = false;
+        btnText.hidden = false;
+        btnLoader.hidden = true;
+      }
+    });
+
+    updateTotalCount();
+  </script>
+</body>
+</html>
