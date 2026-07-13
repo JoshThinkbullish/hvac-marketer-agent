@@ -3,366 +3,871 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>HVAC Ad Generator</title>
+  <title>HVAC Marketer Agent</title>
   <link rel="stylesheet" href="/static/style.css" />
 </head>
 <body>
-  <div class="container">
+  <div class="shell">
 
-    <!-- Google Drive status bar -->
-    <div class="drive-bar {% if connected %}drive-bar--connected{% elif not creds_present %}drive-bar--warn{% else %}drive-bar--disconnected{% endif %}">
-      {% if connected %}
-        <div class="drive-bar__left">
-          <span class="dot dot--green"></span>
-          <span>Google Drive connected</span>
+    <header class="topbar">
+      <div class="topbar__brand">
+        <div class="topbar__logo">HM</div>
+        <div>
+          <h1>HVAC Marketer Agent</h1>
+          <p class="subtitle">Brief in → ad creatives, copy &amp; scripts out, straight to Drive.</p>
         </div>
-        <a href="/auth/disconnect" class="drive-bar__action drive-bar__action--muted">Disconnect</a>
-      {% elif not creds_present %}
-        <div class="drive-bar__left">
-          <span class="dot dot--yellow"></span>
-          <span>Google credentials not configured</span>
-        </div>
-      {% else %}
-        <div class="drive-bar__left">
-          <span class="dot dot--gray"></span>
-          <span>Google Drive not connected</span>
-        </div>
-        <a href="/auth/google" class="drive-bar__action">Connect Google Drive</a>
-      {% endif %}
-    </div>
-
-    {% if connected_msg %}
-      <div class="flash flash--success">Google Drive connected successfully.</div>
-    {% endif %}
-    {% if error_msg == "missing_credentials" %}
-      <div class="flash flash--error">Google credentials not found in .env file.</div>
-    {% endif %}
-
-    <header>
-      <h1>HVAC Ad Generator</h1>
-      <p class="subtitle">Fill out the form — we'll build the ads and save them to Drive.</p>
-    </header>
-
-    <form id="adForm">
-
-      <!-- Section: Client Info -->
-      <div class="section-label">Client Info</div>
-
-      <div class="field">
-        <label for="business">Business Name</label>
-        <input type="text" id="business" name="business" placeholder="e.g. Comfort Air Solutions" required />
       </div>
-
-      <div class="field">
-        <label for="offer">Offer / Ad Copy</label>
-        <textarea id="offer" name="offer" rows="3" placeholder="e.g. $99 AC Tune-Up — Book Before June 30th. Stay cool all summer!" required></textarea>
-      </div>
-
-      <div class="field">
-        <label for="system">HVAC System</label>
-        {% if systems %}
-          <select id="system" name="system" required>
-            <option value="" disabled selected>Select a system...</option>
-            {% for s in systems %}
-              <option value="{{ s.name }}">{{ s.name }}</option>
-            {% endfor %}
-          </select>
+      <div class="topbar__drive">
+        {% if not openai_ok %}
+          <span class="chip chip--warn"><span class="dot dot--yellow"></span> OPENAI_API_KEY missing</span>
+        {% endif %}
+        {% if not anthropic_ok %}
+          <span class="chip chip--warn"><span class="dot dot--yellow"></span> ANTHROPIC_API_KEY missing</span>
+        {% endif %}
+        {% if not elevenlabs_ok %}
+          <span class="chip chip--warn"><span class="dot dot--yellow"></span> ELEVENLABS_API_KEY missing</span>
+        {% endif %}
+        {% if connected %}
+          <span class="chip chip--ok"><span class="dot dot--green"></span> Drive connected</span>
+          <a href="/auth/disconnect" class="chip-action">Disconnect</a>
+        {% elif not creds_present %}
+          <span class="chip chip--warn"><span class="dot dot--yellow"></span> Google creds missing in .env</span>
         {% else %}
-          <div class="no-systems">
-            No systems found. Add images to the <code>hvac_systems/</code> folder and restart.
-          </div>
+          <span class="chip"><span class="dot dot--gray"></span> Drive not connected</span>
+          <a href="/auth/google" class="chip-action chip-action--primary">Connect Google Drive</a>
         {% endif %}
       </div>
+    </header>
 
-      <div class="field">
-        <label for="location">Location / Call-Out</label>
-        <input type="text" id="location" name="location" placeholder="e.g. Phoenix, AZ — Serving the East Valley" required />
-      </div>
+    {% if connected_msg %}<div class="flash flash--success">Google Drive connected successfully.</div>{% endif %}
+    {% if error_msg == "missing_credentials" %}<div class="flash flash--error">Google credentials not found in .env file.</div>{% endif %}
+    {% if error_msg == "google_auth_failed" %}<div class="flash flash--error">Google sign-in was cancelled or failed. Click “Connect Google Drive” to try again.</div>{% endif %}
 
-      <!-- Section: Save Location -->
-      <div class="section-label">Save Location</div>
+    <div class="layout">
 
-      <div class="field">
-        <label>Google Drive Folder</label>
+      <!-- ══════════ LEFT: FORM ══════════ -->
+      <form id="adForm" class="panel form-panel" autocomplete="off">
 
-        <!-- Hidden fields sent with form -->
-        <input type="hidden" id="folder_id"   name="folder_id" />
-        <input type="hidden" id="folder_name" name="folder_name" />
+        <div class="section-label">1 · Client</div>
 
-        <div class="folder-picker" id="folderPicker">
-          <div class="folder-search-wrap">
-            <span class="folder-icon">&#128193;</span>
-            <input
-              type="text"
-              id="folderSearch"
-              class="folder-search-input"
-              placeholder="Search your Drive folders..."
-              autocomplete="off"
-            />
-            <button type="button" class="folder-refresh" id="folderRefresh" title="Refresh folders">&#8635;</button>
-          </div>
-
-          <div class="folder-selected" id="folderSelected" hidden>
-            <span class="folder-selected-icon">&#128193;</span>
-            <span id="folderSelectedName"></span>
-            <button type="button" class="folder-clear" id="folderClear">&#10005; Change</button>
-          </div>
-
-          <div class="folder-dropdown" id="folderDropdown" hidden>
-            <div id="folderList"></div>
-          </div>
-
-          <div class="field-hint" id="folderHint">Connect Google Drive first to browse folders</div>
+        <div class="field">
+          <label for="business">Client Name <span class="req">*</span></label>
+          <input type="text" id="business" name="business" placeholder="e.g. TopFlight Air" required />
         </div>
-      </div>
 
-      <!-- Section: Ad Output -->
-      <div class="section-label">Ad Output</div>
-
-      <div class="field">
-        <label for="variants">Variants per Ad Type</label>
-        <select id="variants" name="variants">
-          <option value="1">1 variant</option>
-          <option value="2">2 variants</option>
-          <option value="3">3 variants</option>
-          <option value="4">4 variants</option>
-        </select>
-        <div class="field-hint">How many versions of each ad concept to generate</div>
-      </div>
-
-      <!-- Ad Types / Prompts -->
-      <div class="field">
-        <label>Ad Types <span class="label-count" id="adTypeCount">(1)</span></label>
-        <div class="field-hint" style="margin-bottom:10px">Each type is a different concept or style — all use the same business info above</div>
-        <div id="adTypeList">
-          <div class="ad-type-row" data-index="1">
-            <div class="ad-type-number">1</div>
-            <input type="text" name="ad_prompt_1" placeholder="e.g. Summer cooling deal with bold headline" required />
-            <button type="button" class="btn-remove-ad" onclick="removeAdType(this)" hidden>✕</button>
+        <div class="field-row">
+          <div class="field">
+            <label for="website">Website</label>
+            <input type="text" id="website" name="website" placeholder="https://…" />
+          </div>
+          <div class="field">
+            <label for="callout">Callout (city / region)</label>
+            <input type="text" id="callout" name="callout" placeholder="e.g. Palm Beach County" />
           </div>
         </div>
-        <button type="button" class="btn-add-ad" id="addAdBtn" onclick="addAdType()">+ Add another ad type</button>
+        <div class="field-hint field-hint--pullup">
+          Callout is used in ad copy and the “Marketer Quit” geo-tag only — image scenes stay location-generic.
+          Required for ad copy / full pipeline.
+        </div>
+
+        <div class="section-label">2 · Offer</div>
+
+        <div class="field">
+          <label for="headline">Headline — main offer <span class="req">*</span></label>
+          <input type="text" id="headline" name="headline" placeholder="e.g. $0 Down On A New HVAC System" required />
+        </div>
+
+        <div class="field">
+          <label for="subheadline">Sub-headline — second offer</label>
+          <input type="text" id="subheadline" name="subheadline" placeholder="e.g. Up to $3,000 in rebates" />
+        </div>
+
+        <div class="field">
+          <label for="features">Also include <span class="label-note">one per line</span></label>
+          <textarea id="features" name="features" rows="3" placeholder="FREE WiFi Smart Thermostat&#10;10 Year Warranty&#10;Flexible financing available"></textarea>
+        </div>
+
+        <div class="field">
+          <label for="dont_include">Don't include <span class="label-note">one per line</span></label>
+          <textarea id="dont_include" name="dont_include" rows="2" placeholder="thermostat image&#10;furnace image"></textarea>
+          <div class="field-hint">Location names, phone numbers, websites and “Call Today” CTAs are always excluded automatically.</div>
+        </div>
+
+        <div class="section-label">3 · Creative</div>
+
+        <div class="field-row">
+          <div class="field">
+            <label for="combo_system_input">HVAC System <span class="req">*</span></label>
+            {% if systems %}
+              <input type="hidden" id="system" name="system" />
+              <div class="combo" id="combo_system">
+                <div class="folder-search-wrap">
+                  <input type="text" class="folder-search-input" id="combo_system_input" placeholder="Search systems…" autocomplete="off" />
+                  <span class="combo-caret">▾</span>
+                </div>
+                <div class="folder-dropdown" hidden><div class="combo-list"></div></div>
+              </div>
+              <div class="field-hint">Added a file to <code>hvac_systems/</code>? Refresh this page to see it.</div>
+            {% else %}
+              <div class="no-assets">Drop unit images into <code>hvac_systems/</code> and refresh.</div>
+            {% endif %}
+          </div>
+          <div class="field">
+            <label for="combo_logo_input">Client Logo</label>
+            {% if logos %}
+              <input type="hidden" id="logo" name="logo" />
+              <div class="combo" id="combo_logo">
+                <div class="folder-search-wrap">
+                  <input type="text" class="folder-search-input" id="combo_logo_input" placeholder="Search logos…" autocomplete="off" />
+                  <span class="combo-caret">▾</span>
+                </div>
+                <div class="folder-dropdown" hidden><div class="combo-list"></div></div>
+              </div>
+              <div class="field-hint">Added a file to <code>logos/</code>? Refresh this page to see it.</div>
+            {% else %}
+              <div class="no-assets">Drop logos into <code>logos/</code> and refresh.</div>
+            {% endif %}
+          </div>
+        </div>
+
+        <div class="field" id="logoModeField">
+          <label>Logo Placement</label>
+          <div class="segmented" role="radiogroup">
+            <label class="seg"><input type="radio" name="logo_mode" value="ai" checked /><span>Blended into design<small>AI places it in the layout</small></span></label>
+            <label class="seg"><input type="radio" name="logo_mode" value="overlay" /><span>Clean corner overlay<small>Pixel-perfect, bottom-left</small></span></label>
+          </div>
+        </div>
+
+        <div class="field">
+          <label for="combo_setting_input">Scene Setting</label>
+          <input type="hidden" id="setting" name="setting" value="vary" />
+          <div class="combo" id="combo_setting">
+            <div class="folder-search-wrap">
+              <input type="text" class="folder-search-input" id="combo_setting_input" placeholder="Search settings…" autocomplete="off" />
+              <span class="combo-caret">▾</span>
+            </div>
+            <div class="folder-dropdown" hidden><div class="combo-list"></div></div>
+          </div>
+          <div class="field-hint">The home shown in scene-based styles. “Vary” rotates a different setting into each image.</div>
+        </div>
+
+        <div class="field">
+          <label>Ad Styles <span class="label-note">pick any — images cycle through them</span></label>
+
+          <div class="style-family">Designed ads
+            <span class="family-toggles">
+              <button type="button" class="family-toggle" data-family="designed" data-on="1">All</button>
+              <button type="button" class="family-toggle" data-family="designed" data-on="0">None</button>
+            </span>
+          </div>
+          <div class="style-grid">
+            {% for s in styles if s.family == 'designed' %}
+              <label class="style-card">
+                <input type="checkbox" name="styles" value="{{ s.key }}" data-family="designed" {% if s.key in default_styles %}checked{% endif %} />
+                <span class="style-card__body">
+                  <span class="style-card__name">{{ s.label }}</span>
+                  <span class="style-card__desc">{{ s.description }}</span>
+                </span>
+              </label>
+            {% endfor %}
+          </div>
+
+          <div class="style-family">Organic / native
+            <span class="family-toggles">
+              <button type="button" class="family-toggle" data-family="organic" data-on="1">All</button>
+              <button type="button" class="family-toggle" data-family="organic" data-on="0">None</button>
+            </span>
+          </div>
+          <div class="style-grid">
+            {% for s in styles if s.family == 'organic' %}
+              <label class="style-card">
+                <input type="checkbox" name="styles" value="{{ s.key }}" data-family="organic" {% if s.key in default_styles %}checked{% endif %} />
+                <span class="style-card__body">
+                  <span class="style-card__name">{{ s.label }}</span>
+                  <span class="style-card__desc">{{ s.description }}</span>
+                </span>
+              </label>
+            {% endfor %}
+          </div>
+        </div>
+
+        <div class="field-row">
+          <div class="field">
+            <label for="count">Images</label>
+            <div class="stepper">
+              <button type="button" class="stepper__btn" data-step="-1">−</button>
+              <input type="number" id="count" name="count" value="5" min="1" max="{{ max_images }}" />
+              <button type="button" class="stepper__btn" data-step="1">+</button>
+            </div>
+          </div>
+          <div class="field">
+            <label>Quality</label>
+            <div class="segmented segmented--compact" role="radiogroup">
+              <label class="seg"><input type="radio" name="quality" value="low" /><span>Low</span></label>
+              <label class="seg"><input type="radio" name="quality" value="medium" /><span>Med</span></label>
+              <label class="seg"><input type="radio" name="quality" value="high" checked /><span>High</span></label>
+            </div>
+          </div>
+        </div>
+
+        <div class="section-label">4 · Output</div>
+
+        <div class="field">
+          <div class="segmented segmented--stack" role="radiogroup">
+            <label class="seg"><input type="radio" name="mode" value="images" checked /><span>Images only<small>Just the ad creatives + prompt sheet</small></span></label>
+            <label class="seg"><input type="radio" name="mode" value="images_copy" /><span>Images + Ad Copy<small>Adds Meta primary text &amp; landing page prompt</small></span></label>
+            <label class="seg"><input type="radio" name="mode" value="full" /><span>Full pipeline<small>Adds scripts, voiceovers &amp; B-roll prompts</small></span></label>
+          </div>
+          <div class="field-hint field-hint--warn" id="modeWarning" hidden></div>
+        </div>
+
+        <div class="section-label">5 · Destination</div>
+
+        <div class="field">
+          <label>Drive Folder <span class="req">*</span></label>
+          <input type="hidden" id="folder_id" name="folder_id" />
+          <input type="hidden" id="folder_name" name="folder_name" />
+          <div class="folder-picker" id="folderPicker">
+            <div class="folder-search-wrap">
+              <span class="folder-icon">&#128193;</span>
+              <input type="text" id="folderSearch" class="folder-search-input" placeholder="Search your Drive folders…" autocomplete="off" />
+              <button type="button" class="folder-refresh" id="folderRefresh" title="Refresh folders">&#8635;</button>
+            </div>
+            <div class="folder-selected" id="folderSelected" hidden>
+              <span>&#128193;</span>
+              <span id="folderSelectedName"></span>
+              <button type="button" class="folder-clear" id="folderClear">&#10005; Change</button>
+            </div>
+            <div class="folder-dropdown" id="folderDropdown" hidden><div id="folderList"></div></div>
+            <div class="field-hint" id="folderHint"></div>
+          </div>
+        </div>
+
+        <div class="actions">
+          <button type="button" id="previewBtn" class="btn btn--ghost">Preview prompts</button>
+          <button type="submit" id="submitBtn" class="btn btn--primary" {% if not systems or not connected %}disabled{% endif %}>
+            Generate
+          </button>
+        </div>
+      </form>
+
+      <!-- ══════════ RIGHT: OUTPUT ══════════ -->
+      <div class="output-col">
+        <div class="panel summary" id="summaryPanel">
+          <div class="summary__title">This run will create</div>
+          <div class="summary__body" id="summaryBody"></div>
+        </div>
+
+        <div class="panel run" id="runPanel" hidden>
+          <div class="run__header">
+            <div>
+              <div class="run__phase" id="runPhase">Starting…</div>
+              <div class="run__meta" id="runMeta"></div>
+            </div>
+            <div class="run__header-right">
+              <div class="run__count" id="runCount"></div>
+              <button type="button" class="btn-cancel" id="cancelBtn" hidden>Cancel run</button>
+            </div>
+          </div>
+          <div class="progress"><div class="progress__bar" id="progressBar"></div></div>
+
+          <div class="tile-grid" id="tileGrid"></div>
+
+          <div class="assets" id="assetsBox" hidden>
+            <div class="assets__title">Docs &amp; assets</div>
+            <div class="assets__links" id="assetLinks"></div>
+          </div>
+
+          <div class="warnings" id="warningsBox" hidden></div>
+          <div class="run__footer" id="runFooter" hidden></div>
+        </div>
+
+        <div class="panel prev-runs" id="prevRuns" hidden>
+          <div class="assets__title">Previous runs this session</div>
+          <div class="assets__links" id="prevRunLinks"></div>
+        </div>
+
+        <div id="errorBox" class="error-box" hidden></div>
       </div>
-
-      <!-- Total count indicator -->
-      <div class="total-bar">
-        Total: <strong id="totalCount">1</strong> image<span id="totalPlural">s</span> will be generated
-      </div>
-
-      <button type="submit" id="submitBtn" {% if not systems %}disabled{% endif %}>
-        <span class="btn-text">Generate Ads</span>
-        <span class="btn-loader" hidden>Generating... this can take a minute</span>
-      </button>
-    </form>
-
-    <div id="result" hidden>
-      <div class="result-card" id="resultCard"></div>
     </div>
-    <div id="errorBox" class="error-box" hidden></div>
+  </div>
+
+  <!-- Prompt preview modal -->
+  <div class="modal" id="promptModal" hidden>
+    <div class="modal__backdrop" data-close></div>
+    <div class="modal__card">
+      <div class="modal__head">
+        <h2>Prompt preview</h2>
+        <button type="button" class="modal__close" data-close>&#10005;</button>
+      </div>
+      <p class="modal__hint">These are the exact prompts the run will send to the image model — offer text is inserted verbatim, nothing is paraphrased.</p>
+      <div class="modal__body" id="promptList"></div>
+    </div>
   </div>
 
   <script>
+    const form = document.getElementById('adForm');
+    const $ = id => document.getElementById(id);
+    // HTML-escape anything server- or model-derived before innerHTML use.
+    const esc = s => String(s ?? '').replace(/[&<>"']/g,
+      c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+
+    // Drop stale ?connected=true / ?error=... after the flash renders once.
+    if (location.search) history.replaceState(null, '', location.pathname);
+
+    const KEYS = {
+      openai: {{ 'true' if openai_ok else 'false' }},
+      anthropic: {{ 'true' if anthropic_ok else 'false' }},
+      elevenlabs: {{ 'true' if elevenlabs_ok else 'false' }},
+    };
+    const RATES = { low: 0.006, medium: 0.053, high: 0.211 };  // gpt-image-2 $/image, approx
+    const SYSTEM_NAMES = {{ systems|map(attribute='name')|list|tojson }};
+    const LOGO_NAMES = {{ logos|map(attribute='name')|list|tojson }};
+    const SETTINGS_MAP = {{ settings|tojson }};
+
+    // ── Searchable combo (system / logo / scene setting) ─────────────────
+    const COMBOS = {};
+    function initCombo(hiddenId, options) {
+      const hidden = $(hiddenId);
+      const root = $(`combo_${hiddenId}`);
+      if (!hidden || !root) return;
+      const input = root.querySelector('.folder-search-input');
+      const dropdown = root.querySelector('.folder-dropdown');
+      const list = root.querySelector('.combo-list');
+      const labelFor = v => (options.find(o => o.value === v) || {}).label || '';
+
+      function render(filter) {
+        const q = (filter || '').toLowerCase();
+        const matches = q ? options.filter(o => o.label.toLowerCase().includes(q)) : options;
+        list.innerHTML = matches.length
+          ? matches.map(o => `<div class="folder-item${o.value === hidden.value ? ' folder-item--active' : ''}" data-value="${esc(o.value)}">${esc(o.label)}</div>`).join('')
+          : '<div class="folder-empty">No matches</div>';
+        list.querySelectorAll('.folder-item').forEach(el => {
+          // mousedown so selection wins over the input's blur handler
+          el.addEventListener('mousedown', ev => {
+            ev.preventDefault();
+            set(el.dataset.value);
+            dropdown.hidden = true;
+            input.blur();
+          });
+        });
+        dropdown.hidden = false;
+      }
+
+      function set(value, silent = false) {
+        if (!options.some(o => o.value === value)) return;
+        hidden.value = value;
+        input.value = labelFor(value);
+        if (!silent) hidden.dispatchEvent(new Event('change', { bubbles: true }));
+      }
+
+      input.addEventListener('focus', () => { input.select(); render(''); });
+      input.addEventListener('input', () => render(input.value));
+      input.addEventListener('blur', () => {
+        setTimeout(() => { dropdown.hidden = true; input.value = labelFor(hidden.value); }, 120);
+      });
+      input.addEventListener('keydown', e => {
+        if (e.key === 'Enter') {
+          e.preventDefault();
+          const first = list.querySelector('.folder-item');
+          if (first) { set(first.dataset.value); dropdown.hidden = true; input.blur(); }
+        }
+        if (e.key === 'Escape') { dropdown.hidden = true; input.blur(); }
+      });
+      input.value = labelFor(hidden.value);
+      COMBOS[hiddenId] = { set, options };
+    }
+
+    initCombo('system', SYSTEM_NAMES.map(n => ({ value: n, label: n })));
+    initCombo('logo', [{ value: '', label: 'No logo' },
+                       ...LOGO_NAMES.map(n => ({ value: n, label: n }))]);
+    initCombo('setting', Object.entries(SETTINGS_MAP).map(([value, label]) => ({ value, label })));
+
+    // ── Form persistence (localStorage) ─────────────────────────────────
+    const STORE_KEY = 'hvac_brief_v1';
+    const FIELD_IDS = ['business', 'website', 'callout', 'headline',
+                       'subheadline', 'features', 'dont_include', 'system',
+                       'logo', 'setting', 'count'];
+
+    function saveBrief() {
+      const data = { fields: {}, radios: {}, styles: [], folder: null };
+      FIELD_IDS.forEach(id => { const el = $(id); if (el) data.fields[id] = el.value; });
+      ['logo_mode', 'quality', 'mode'].forEach(name => {
+        const el = form.querySelector(`input[name="${name}"]:checked`);
+        if (el) data.radios[name] = el.value;
+      });
+      data.styles = [...form.querySelectorAll('input[name="styles"]:checked')].map(c => c.value);
+      if ($('folder_id').value) data.folder = { id: $('folder_id').value, name: $('folder_name').value };
+      try { localStorage.setItem(STORE_KEY, JSON.stringify(data)); } catch {}
+    }
+
+    function restoreBrief() {
+      let data;
+      try { data = JSON.parse(localStorage.getItem(STORE_KEY) || 'null'); } catch { return; }
+      if (!data) return;
+      FIELD_IDS.forEach(id => {
+        const el = $(id);
+        if (el && data.fields[id] !== undefined && data.fields[id] !== '') {
+          // Combos validate the value still exists and sync their display.
+          if (COMBOS[id]) { COMBOS[id].set(data.fields[id], true); return; }
+          el.value = data.fields[id];
+        }
+      });
+      Object.entries(data.radios || {}).forEach(([name, value]) => {
+        const el = form.querySelector(`input[name="${name}"][value="${value}"]`);
+        if (el) el.checked = true;
+      });
+      if (Array.isArray(data.styles) && data.styles.length) {
+        form.querySelectorAll('input[name="styles"]').forEach(c => {
+          c.checked = data.styles.includes(c.value);
+        });
+      }
+      if (data.folder && data.folder.id) selectFolder(data.folder.id, data.folder.name);
+    }
+
+    // ── Live summary ─────────────────────────────────────────────────────
+    function refreshSummary() {
+      const styles = [...form.querySelectorAll('input[name="styles"]:checked')];
+      const count = parseInt($('count').value || '0', 10) || 0;
+      const mode = form.querySelector('input[name="mode"]:checked').value;
+      const quality = form.querySelector('input[name="quality"]:checked').value;
+      const parts = [];
+      parts.push(`<div class="summary__big">${count} image${count === 1 ? '' : 's'}</div>`);
+      parts.push(`<div class="summary__line">${styles.length ? styles.length + ' style' + (styles.length === 1 ? '' : 's') + ' · ' + quality + ' quality' : '<em>no styles selected</em>'}</div>`);
+      parts.push(`<div class="summary__line">~$${(count * RATES[quality]).toFixed(2)} est. image cost</div>`);
+      const extras = { images: 'Prompt sheet doc', images_copy: 'Prompt sheet · Ad copy · Landing page prompt', full: 'Prompt sheet · Ad copy · Landing page prompt · 3 scripts + voiceovers · B-roll prompts' };
+      parts.push(`<div class="summary__line summary__line--muted">${extras[mode]}</div>`);
+      if (count && styles.length > count) {
+        parts.push(`<div class="summary__line summary__line--warn">Only the first ${count} of ${styles.length} selected styles will be used — raise Images to ${styles.length} to cover all.</div>`);
+      }
+      $('summaryBody').innerHTML = parts.join('');
+      syncModeCues();
+    }
+
+    // Callout becomes required + key warnings for copy/full modes.
+    function syncModeCues() {
+      const mode = form.querySelector('input[name="mode"]:checked').value;
+      const warn = $('modeWarning');
+      const msgs = [];
+      if (mode !== 'images') {
+        $('callout').required = true;
+        if (!KEYS.anthropic) msgs.push('ANTHROPIC_API_KEY is missing in .env — the ad-copy step of this mode will fail.');
+        if (!$('callout').value.trim()) msgs.push('Callout (city / region, section 1) is required for this mode.');
+      } else {
+        $('callout').required = false;
+      }
+      if (mode === 'full' && !KEYS.elevenlabs) msgs.push('ELEVENLABS_API_KEY is missing in .env — voiceovers will fail.');
+      warn.hidden = msgs.length === 0;
+      warn.textContent = msgs.join(' ');
+    }
+
+    form.addEventListener('input', () => { refreshSummary(); saveBrief(); });
+    form.addEventListener('change', () => { refreshSummary(); saveBrief(); });
+
+    // Family All/None toggles
+    document.querySelectorAll('.family-toggle').forEach(btn => {
+      btn.addEventListener('click', () => {
+        const on = btn.dataset.on === '1';
+        form.querySelectorAll(`input[name="styles"][data-family="${btn.dataset.family}"]`)
+          .forEach(c => { c.checked = on; });
+        refreshSummary(); saveBrief();
+      });
+    });
+
+    // Stepper
+    document.querySelectorAll('.stepper__btn').forEach(btn => {
+      btn.addEventListener('click', () => {
+        const input = $('count');
+        const v = parseInt(input.value || '1', 10) + parseInt(btn.dataset.step, 10);
+        input.value = Math.min({{ max_images }}, Math.max(1, v));
+        refreshSummary();
+        saveBrief();
+      });
+    });
+
+    // Hide logo placement when no logo picked
+    const logoSelect = $('logo');
+    function syncLogoMode() {
+      if (!logoSelect) return;
+      $('logoModeField').style.display = logoSelect.value ? '' : 'none';
+    }
+    if (logoSelect) logoSelect.addEventListener('change', syncLogoMode);
+    syncLogoMode();
+    refreshSummary();
+
     // ── Folder picker ────────────────────────────────────────────────────
     let allFolders = [];
-    const folderSearch   = document.getElementById('folderSearch');
-    const folderDropdown = document.getElementById('folderDropdown');
-    const folderList     = document.getElementById('folderList');
-    const folderSelected = document.getElementById('folderSelected');
-    const folderSelectedName = document.getElementById('folderSelectedName');
-    const folderClear    = document.getElementById('folderClear');
-    const folderRefresh  = document.getElementById('folderRefresh');
-    const folderHint     = document.getElementById('folderHint');
-    const folderIdInput  = document.getElementById('folder_id');
-    const folderNameInput = document.getElementById('folder_name');
+    const folderSearch = $('folderSearch'), folderDropdown = $('folderDropdown'),
+          folderList = $('folderList'), folderSelected = $('folderSelected'),
+          folderSelectedName = $('folderSelectedName'), folderHint = $('folderHint');
 
     async function loadFolders() {
-      folderHint.textContent = 'Loading folders...';
+      folderHint.textContent = 'Loading folders…';
       folderHint.hidden = false;
       try {
         const res = await fetch('/api/drive/folders');
         const json = await res.json();
         if (json.error) throw new Error(json.error);
-        allFolders = json.folders;
+        allFolders = json.folders || [];
+        if (!allFolders.length) {
+          folderHint.textContent = 'No folders found in this Drive account.';
+          return;
+        }
         folderHint.hidden = true;
         folderSearch.disabled = false;
-        renderFolderList('');
       } catch (err) {
-        folderHint.textContent = err.message.includes('Not connected')
-          ? 'Connect Google Drive first to browse folders'
-          : 'Failed to load folders: ' + err.message;
-        folderHint.hidden = false;
+        folderHint.textContent = 'Failed to load folders: ' + err.message;
       }
     }
 
     function renderFolderList(query) {
       const q = query.toLowerCase();
-      const matches = q
-        ? allFolders.filter(f => f.name.toLowerCase().includes(q))
-        : allFolders;
-
-      if (!matches.length) {
-        folderList.innerHTML = '<div class="folder-empty">No folders found</div>';
-      } else {
-        folderList.innerHTML = matches.slice(0, 80).map(f => `
-          <div class="folder-item" data-id="${f.id}" data-name="${f.name}">
-            <span class="fi">&#128193;</span> ${f.name}
-          </div>`).join('');
-        folderList.querySelectorAll('.folder-item').forEach(el => {
-          el.addEventListener('click', () => selectFolder(el.dataset.id, el.dataset.name));
-        });
+      const matches = q ? allFolders.filter(f => f.name.toLowerCase().includes(q)) : allFolders;
+      let html = matches.slice(0, 80).map(f => `<div class="folder-item" data-id="${esc(f.id)}" data-name="${esc(f.name)}">&#128193; ${esc(f.name)}</div>`).join('');
+      // Pasted a Drive folder URL or a bare folder ID? Offer it directly —
+      // covers folders beyond the 500-folder listing cap.
+      const urlMatch = query.match(/folders\/([\w-]{15,})/);
+      const idMatch = urlMatch ? urlMatch[1] : (/^[\w-]{25,}$/.test(query.trim()) ? query.trim() : null);
+      if (idMatch) {
+        html = `<div class="folder-item" data-id="${esc(idMatch)}" data-name="Pasted folder (${esc(idMatch.slice(0, 8))}…)">&#128279; Use pasted folder ID</div>` + html;
       }
+      folderList.innerHTML = html || '<div class="folder-empty">No folders found — or paste a Drive folder link</div>';
+      folderList.querySelectorAll('.folder-item').forEach(el => {
+        el.addEventListener('click', () => selectFolder(el.dataset.id, el.dataset.name));
+      });
       folderDropdown.hidden = false;
     }
 
     function selectFolder(id, name) {
-      folderIdInput.value   = id;
-      folderNameInput.value = name;
+      $('folder_id').value = id;
+      $('folder_name').value = name;
       folderSelectedName.textContent = name;
       folderSelected.hidden = false;
       folderDropdown.hidden = true;
-      folderSearch.value    = '';
-      folderHint.hidden     = true;
+      folderSearch.value = '';
+      folderHint.hidden = true;
+      saveBrief();
     }
 
-    folderClear.addEventListener('click', () => {
-      folderIdInput.value = '';
-      folderNameInput.value = '';
+    $('folderClear').addEventListener('click', () => {
+      $('folder_id').value = ''; $('folder_name').value = '';
       folderSelected.hidden = true;
-      folderSearch.value = '';
-      renderFolderList('');
+      saveBrief();
     });
+    folderSearch.addEventListener('focus', () => { if (allFolders.length) renderFolderList(folderSearch.value); });
+    folderSearch.addEventListener('input', () => { if (allFolders.length) renderFolderList(folderSearch.value); });
+    $('folderRefresh').addEventListener('click', () => { allFolders = []; loadFolders(); });
+    document.addEventListener('click', e => { if (!e.target.closest('#folderPicker')) folderDropdown.hidden = true; });
 
-    folderSearch.addEventListener('focus', () => {
-      if (allFolders.length) renderFolderList(folderSearch.value);
-    });
-
-    folderSearch.addEventListener('input', () => {
-      if (allFolders.length) renderFolderList(folderSearch.value);
-    });
-
-    folderRefresh.addEventListener('click', () => {
-      allFolders = [];
-      folderSelected.hidden = true;
-      folderDropdown.hidden = true;
-      folderIdInput.value = '';
-      loadFolders();
-    });
-
-    document.addEventListener('click', (e) => {
-      if (!e.target.closest('#folderPicker')) folderDropdown.hidden = true;
-    });
-
-    // Only load if Drive is connected
-    if (document.querySelector('.drive-bar--connected')) {
+    {% if connected %}
       folderSearch.disabled = false;
       loadFolders();
-    } else {
+    {% else %}
       folderSearch.disabled = true;
-    }
+      folderHint.textContent = 'Connect Google Drive first to browse folders.';
+      folderHint.hidden = false;
+    {% endif %}
 
-    // ── Ad types ────────────────────────────────────────────────────────
-    let adTypeCount = 1;
+    // ── Prompt preview ───────────────────────────────────────────────────
+    const modal = $('promptModal');
+    document.querySelectorAll('[data-close]').forEach(el => el.addEventListener('click', () => modal.hidden = true));
 
-    function updateTotalCount() {
-      const variants = parseInt(document.getElementById('variants').value) || 1;
-      const types = document.querySelectorAll('.ad-type-row').length;
-      const total = variants * types;
-      document.getElementById('totalCount').textContent = total;
-      document.getElementById('totalPlural').textContent = total === 1 ? '' : 's';
-      document.getElementById('adTypeCount').textContent = `(${types})`;
-    }
-
-    function addAdType() {
-      adTypeCount++;
-      const list = document.getElementById('adTypeList');
-      const row = document.createElement('div');
-      row.className = 'ad-type-row';
-      row.dataset.index = adTypeCount;
-      row.innerHTML = `
-        <div class="ad-type-number">${list.children.length + 1}</div>
-        <input type="text" name="ad_prompt_${adTypeCount}" placeholder="e.g. Emergency service — 24/7 availability" />
-        <button type="button" class="btn-remove-ad" onclick="removeAdType(this)">✕</button>
-      `;
-      list.appendChild(row);
-      updateRemoveButtons();
-      updateTotalCount();
-    }
-
-    function removeAdType(btn) {
-      btn.closest('.ad-type-row').remove();
-      renumberAdTypes();
-      updateRemoveButtons();
-      updateTotalCount();
-    }
-
-    function renumberAdTypes() {
-      document.querySelectorAll('.ad-type-row').forEach((row, i) => {
-        row.querySelector('.ad-type-number').textContent = i + 1;
-        row.querySelector('input').name = `ad_prompt_${i + 1}`;
-      });
-    }
-
-    function updateRemoveButtons() {
-      const rows = document.querySelectorAll('.ad-type-row');
-      rows.forEach(row => {
-        row.querySelector('.btn-remove-ad').hidden = rows.length === 1;
-      });
-    }
-
-    document.getElementById('variants').addEventListener('change', updateTotalCount);
-
-    // Form submit
-    const form = document.getElementById('adForm');
-    const submitBtn = document.getElementById('submitBtn');
-    const btnText = submitBtn.querySelector('.btn-text');
-    const btnLoader = submitBtn.querySelector('.btn-loader');
-    const resultDiv = document.getElementById('result');
-    const resultCard = document.getElementById('resultCard');
-    const errorBox = document.getElementById('errorBox');
-
-    form.addEventListener('submit', async (e) => {
-      e.preventDefault();
-      errorBox.hidden = true;
-      resultDiv.hidden = true;
-      submitBtn.disabled = true;
-      btnText.hidden = true;
-      btnLoader.hidden = false;
-
+    $('previewBtn').addEventListener('click', async () => {
+      hideError();
+      const btn = $('previewBtn');
+      btn.disabled = true;
+      const oldLabel = btn.textContent;
+      btn.textContent = 'Building…';
       try {
-        const res = await fetch('/generate', { method: 'POST', body: new FormData(form) });
+        const res = await fetch('/api/preview', { method: 'POST', body: new FormData(form) });
         const json = await res.json();
-        if (!res.ok || json.error) throw new Error(json.error || 'Unknown error');
-
-        const linksHtml = json.links.map(item => `
-          <a href="${item.url}" target="_blank" class="drive-link">
-            ${item.label} &rarr; Google Drive
-          </a>
-        `).join('');
-
-        const warningsHtml = json.warnings?.length
-          ? `<div class="warnings">${json.warnings.map(w => `<p>⚠ ${w}</p>`).join('')}</div>`
+        if (!res.ok || json.error) throw new Error(json.error || 'Preview failed');
+        const warnHtml = (json.warnings || []).length
+          ? `<div class="warnings" style="margin:0 0 8px">${json.warnings.map(w => `<p>⚠ ${esc(w)}</p>`).join('')}</div>`
           : '';
+        $('promptList').innerHTML = warnHtml + json.prompts.map(p => `
+          <div class="prompt-block">
+            <div class="prompt-block__head">
+              <span class="prompt-block__label">${String(p.idx).padStart(2, '0')} · ${esc(p.style)}</span>
+              <button type="button" class="copy-btn" data-prompt="${encodeURIComponent(p.prompt)}">Copy</button>
+            </div>
+            <pre>${esc(p.prompt)}</pre>
+          </div>`).join('');
+        $('promptList').querySelectorAll('.copy-btn').forEach(btn => {
+          btn.addEventListener('click', () => {
+            navigator.clipboard.writeText(decodeURIComponent(btn.dataset.prompt));
+            btn.textContent = 'Copied ✓';
+            setTimeout(() => btn.textContent = 'Copy', 1500);
+          });
+        });
+        modal.hidden = false;
+      } catch (err) { showError(err.message); }
+      finally { btn.disabled = false; btn.textContent = oldLabel; }
+    });
 
-        resultCard.innerHTML = `
-          <div class="result-success">
-            <div class="check">&#10003;</div>
-            <h2>${json.count} ad${json.count !== 1 ? 's' : ''} created for <em>${json.business}</em></h2>
-            <p>Saved to <strong>MarketingImages / ${json.business} / ${json.folder}</strong></p>
-            ${warningsHtml}
-            <div class="links">${linksHtml}</div>
+    // ── Run + polling ────────────────────────────────────────────────────
+    const submitBtn = $('submitBtn');
+    let pollTimer = null;
+
+    function showError(msg) { const b = $('errorBox'); b.textContent = msg; b.hidden = false; }
+    function hideError() { $('errorBox').hidden = true; }
+
+    const STATUS_META = {
+      queued:     { label: 'Queued',     cls: 'is-queued' },
+      generating: { label: 'Generating', cls: 'is-working' },
+      uploading:  { label: 'Uploading',  cls: 'is-working' },
+      done:       { label: 'Done',       cls: 'is-done' },
+      failed:     { label: 'Failed',     cls: 'is-failed' },
+    };
+
+    let lastJob = null;
+    let openRefine = { idx: null, value: '', focus: false };
+
+    function renderJob(job) {
+      lastJob = job;
+      $('runPanel').hidden = false;
+      $('runPhase').textContent = job.status === 'error' ? 'Run failed' : job.phase;
+      $('runMeta').textContent = `${job.client_name} → ${job.folder_name || 'Drive'} / ${job.run_folder_name || '…'}`;
+      $('cancelBtn').hidden = job.status !== 'running';
+      $('cancelBtn').dataset.jobId = job.id;
+
+      const total = job.items.length;
+      const settled = job.items.filter(i => i.status === 'done' || i.status === 'failed').length;
+      const done = job.items.filter(i => i.status === 'done').length;
+      $('runCount').textContent = `${done}/${total}`;
+      $('progressBar').style.width = total ? `${(settled / total) * 100}%` : '0%';
+      $('progressBar').classList.toggle('progress__bar--done', job.status === 'done');
+      $('progressBar').classList.toggle('progress__bar--err', job.status === 'error');
+
+      $('tileGrid').innerHTML = job.items.map(item => {
+        const meta = STATUS_META[item.status] || STATUS_META.queued;
+        const canRefine = item.status === 'done';
+        const img = item.has_thumb
+          ? `<img src="/api/jobs/${esc(job.id)}/thumb/${item.idx}" alt="" loading="lazy" />`
+          : `<div class="tile__ph ${meta.cls === 'is-working' ? 'tile__ph--pulse' : ''}"></div>`;
+        const link = item.drive_link
+          ? `<a href="${esc(item.drive_link)}" target="_blank" class="tile__open">Open ↗</a>`
+          : (item.local_image ? `<a href="/api/jobs/${esc(job.id)}/image/${item.idx}" class="tile__open">Save image ↓</a>` : '');
+        const refineBtn = canRefine
+          ? `<button type="button" class="tile__refine" data-refine="${item.idx}" title="Type a tweak, hit Enter — generates a refined copy">✎ Refine</button>` : '';
+        const refineBar = openRefine.idx === item.idx ? `
+          <div class="tile__refinebar">
+            <input type="text" placeholder='e.g. "add a smart thermostat next to the unit" — Enter to run' value="${esc(openRefine.value)}" />
+          </div>` : '';
+        const err = item.status === 'failed' ? `<div class="tile__err" title="${esc(item.error)}">${esc(item.error || 'Failed')}</div>` : '';
+        return `<div class="tile ${meta.cls}">
+            <div class="tile__img"${canRefine ? ` data-refine="${item.idx}"` : ''}>${img}</div>
+            <div class="tile__bar">
+              <span class="tile__name">${String(item.idx + 1).padStart(2, '0')} ${esc(item.style_label)}</span>
+              <span class="tile__status">${meta.label}</span>
+            </div>
+            ${refineBtn}${link}${refineBar}${err}
           </div>`;
-        resultDiv.hidden = false;
+      }).join('');
+
+      // Re-wire the open refine bar after the innerHTML rebuild.
+      const refineInput = $('tileGrid').querySelector('.tile__refinebar input');
+      if (refineInput) {
+        refineInput.addEventListener('input', () => { openRefine.value = refineInput.value; });
+        refineInput.addEventListener('keydown', e => {
+          if (e.key === 'Enter') {
+            e.preventDefault();
+            const v = refineInput.value.trim();
+            if (v) submitRefine(job.id, openRefine.idx, v);
+          } else if (e.key === 'Escape') {
+            openRefine = { idx: null, value: '', focus: false };
+            renderJob(lastJob);
+          }
+        });
+        if (openRefine.focus) {
+          refineInput.focus();
+          refineInput.setSelectionRange(refineInput.value.length, refineInput.value.length);
+          openRefine.focus = false;
+        }
+      }
+
+      const assets = [];
+      if (job.prompt_doc_link) assets.push({ label: '📝 Image Prompts sheet', url: job.prompt_doc_link });
+      (job.copy.links || []).forEach(l => {
+        const icon = l.kind === 'audio' ? '🎙' : l.kind === 'script' ? '🎬' : '📄';
+        assets.push({ label: `${icon} ${l.label}`, url: l.url });
+      });
+      if (job.copy.status === 'running' || job.copy.status === 'pending') {
+        assets.push({ label: '⏳ Ad copy & scripts generating…', url: '' });
+      }
+      $('assetsBox').hidden = assets.length === 0;
+      $('assetLinks').innerHTML = assets.map(a =>
+        a.url ? `<a href="${esc(a.url)}" target="_blank" class="asset-link">${esc(a.label)}</a>`
+              : `<span class="asset-link asset-link--pending">${esc(a.label)}</span>`).join('');
+
+      const wBox = $('warningsBox');
+      if (job.warnings && job.warnings.length) {
+        wBox.innerHTML = job.warnings.map(w => `<p>⚠ ${esc(w)}</p>`).join('');
+        wBox.hidden = false;
+      } else wBox.hidden = true;
+
+      const footer = $('runFooter');
+      if (job.status !== 'running') {
+        footer.hidden = false;
+        footer.innerHTML = job.status === 'error'
+          ? `<div class="run__result run__result--err">✕ ${esc(job.error) || 'Run failed'}</div>`
+          : `<div class="run__result">✓ ${done}/${total} images${job.copy.status === 'done' ? ' + copy assets' : ''} saved</div>`
+            + (job.run_folder_link ? `<a class="btn btn--primary btn--wide" href="${esc(job.run_folder_link)}" target="_blank">Open run folder in Drive ↗</a>` : '');
+        rememberRun(job);
+      } else footer.hidden = true;
+    }
+
+    // ── Previous-runs list (survives starting a new run, not reloads) ────
+    const prevRuns = [];
+    function rememberRun(job) {
+      if (!job.run_folder_link || prevRuns.some(r => r.id === job.id)) return;
+      prevRuns.unshift({ id: job.id, name: job.run_folder_name, link: job.run_folder_link });
+      if (prevRuns.length > 3) prevRuns.pop();
+    }
+    function showPrevRuns() {
+      if (!prevRuns.length) return;
+      $('prevRuns').hidden = false;
+      $('prevRunLinks').innerHTML = prevRuns.map(r =>
+        `<a href="${esc(r.link)}" target="_blank" class="asset-link">📁 ${esc(r.name)} ↗</a>`).join('');
+    }
+
+    $('cancelBtn').addEventListener('click', async () => {
+      const id = $('cancelBtn').dataset.jobId;
+      if (!id) return;
+      $('cancelBtn').disabled = true;
+      $('cancelBtn').textContent = 'Cancelling…';
+      try { await fetch(`/api/jobs/${id}/cancel`, { method: 'POST' }); } catch {}
+    });
+
+    // ── Click-to-refine ──────────────────────────────────────────────────
+    $('tileGrid').addEventListener('click', e => {
+      if (e.target.closest('.tile__refinebar') || e.target.closest('a')) return;
+      const t = e.target.closest('[data-refine]');
+      if (!t || !lastJob) return;
+      const idx = +t.dataset.refine;
+      openRefine = openRefine.idx === idx
+        ? { idx: null, value: '', focus: false }        // second click closes
+        : { idx, value: '', focus: true };
+      renderJob(lastJob);
+    });
+
+    async function submitRefine(jobId, idx, instruction) {
+      openRefine = { idx: null, value: '', focus: false };
+      hideError();
+      try {
+        const res = await fetch(`/api/jobs/${jobId}/refine/${idx}`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ instruction }),
+        });
+        const json = await res.json();
+        if (!res.ok || json.error) throw new Error(json.error || 'Refine failed');
+        localStorage.setItem('activeJob', jobId);
+        if (pollTimer) clearTimeout(pollTimer);
+        submitBtn.disabled = true;
+        submitBtn.textContent = 'Running…';
+        poll(jobId);
       } catch (err) {
-        errorBox.textContent = err.message;
-        errorBox.hidden = false;
-      } finally {
+        showError(err.message);
+        renderJob(lastJob);
+      }
+    }
+
+    function resetSubmit() {
+      submitBtn.disabled = false;
+      submitBtn.textContent = 'Generate';
+    }
+
+    async function poll(jobId, failures = 0) {
+      try {
+        const res = await fetch(`/api/jobs/${jobId}`);
+        if (res.status === 404) {
+          localStorage.removeItem('activeJob');
+          showError('This run expired from server memory — check the Drive folder for its output.');
+          resetSubmit();
+          return;
+        }
+        const job = await res.json();
+        if (!res.ok) throw new Error(job.error || 'Job lookup failed');
+        renderJob(job);
+        if (job.status === 'running') {
+          pollTimer = setTimeout(() => poll(jobId, 0), 1500);
+        } else {
+          localStorage.removeItem('activeJob');
+          resetSubmit();
+        }
+      } catch (err) {
+        // Transient network/server hiccups shouldn't kill a running job's UI.
+        if (failures < 5) {
+          pollTimer = setTimeout(() => poll(jobId, failures + 1), 3000);
+        } else {
+          showError(err.message + ' — stopped checking; the run may still be finishing in Drive.');
+          resetSubmit();
+        }
+      }
+    }
+
+    form.addEventListener('submit', async e => {
+      e.preventDefault();
+      hideError();
+
+      // Friendly pre-flight — catch the classics before a round-trip.
+      if (!$('system') || !$('system').value) {
+        showError('Pick an HVAC system in section 3.');
+        const si = $('combo_system_input');
+        if (si) { si.focus(); si.scrollIntoView({ block: 'center', behavior: 'smooth' }); }
+        return;
+      }
+      if (!$('folder_id').value) {
+        showError('Pick a Drive folder in section 5 before generating.');
+        folderSearch.focus();
+        folderSearch.scrollIntoView({ block: 'center', behavior: 'smooth' });
+        return;
+      }
+      if (!form.querySelectorAll('input[name="styles"]:checked').length) {
+        showError('Pick at least one ad style in section 3.');
+        return;
+      }
+      const mode = form.querySelector('input[name="mode"]:checked').value;
+      if (mode !== 'images' && !$('callout').value.trim()) {
+        showError('Callout (city / region, section 1) is required for ad copy / full pipeline.');
+        $('callout').focus();
+        $('callout').scrollIntoView({ block: 'center', behavior: 'smooth' });
+        return;
+      }
+
+      if (pollTimer) clearTimeout(pollTimer);
+      submitBtn.disabled = true;
+      submitBtn.textContent = 'Running…';
+      try {
+        const res = await fetch('/api/generate', { method: 'POST', body: new FormData(form) });
+        const json = await res.json();
+        if (!res.ok || json.error) throw new Error(json.error || 'Failed to start run');
+        localStorage.setItem('activeJob', json.job_id);
+        showPrevRuns();
+        $('runPanel').hidden = false;
+        $('tileGrid').innerHTML = '';
+        $('runFooter').hidden = true;
+        $('cancelBtn').disabled = false;
+        $('cancelBtn').textContent = 'Cancel run';
+        poll(json.job_id);
+      } catch (err) {
+        showError(err.message);
         submitBtn.disabled = false;
-        btnText.hidden = false;
-        btnLoader.hidden = true;
+        submitBtn.textContent = 'Generate';
       }
     });
 
-    updateTotalCount();
+    // ── Init: restore the saved brief, then reattach to any live run ─────
+    restoreBrief();
+    syncLogoMode();
+    refreshSummary();
+    const activeJob = localStorage.getItem('activeJob');
+    if (activeJob) {
+      submitBtn.disabled = true;
+      submitBtn.textContent = 'Running…';
+      poll(activeJob);
+    }
   </script>
 </body>
 </html>

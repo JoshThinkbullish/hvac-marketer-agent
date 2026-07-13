@@ -1,5 +1,8 @@
 .env
 token.json
+agent/service_account.json
+service_account.json
 __pycache__/
 *.pyc
 .DS_Store
+.venv/
