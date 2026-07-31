@@ -306,11 +306,20 @@ select option { background: var(--panel-2); }
 .tile.is-failed .tile__status { color: var(--err); }
 .tile.is-working .tile__status { color: var(--accent); }
 .tile__open {
-  position: absolute; top: 8px; right: 8px;
+  position: absolute; top: 8px; right: 42px;
   background: #000000a8; color: #fff; text-decoration: none;
   font-size: 0.7rem; font-weight: 600; padding: 4px 9px; border-radius: 6px;
 }
 .tile__open:hover { background: #000000d8; }
+.tile__download {
+  position: absolute; top: 8px; right: 8px;
+  width: 27px; height: 27px; display: flex; align-items: center;
+  justify-content: center; border-radius: 7px; text-decoration: none;
+  background: var(--accent); color: #fff; font-size: 1rem;
+  font-weight: 800; line-height: 1; box-shadow: 0 2px 8px #0008;
+  transition: filter 0.15s, transform 0.15s;
+}
+.tile__download:hover { filter: brightness(1.18); transform: translateY(-1px); }
 
 /* Click-to-refine */
 .tile__img[data-refine] { cursor: pointer; }

@@ -646,7 +646,7 @@ def _run_copy_pipeline(job: dict, run_folder_id: str,
         copy_state["status"] = "done"
 
 
-def _run_one_image(job: dict, item: dict, images_folder_id: str):
+def _run_one_image(job: dict, item: dict, images_folder_id: str = ""):
     if SHUTTING_DOWN.is_set() or job["_cancel"].is_set():
         with job["_lock"]:
             item["status"] = "failed"
@@ -688,8 +688,10 @@ def _run_one_image(job: dict, item: dict, images_folder_id: str):
                 job["warnings"].append(
                     f"Logo overlay failed for image {item['idx'] + 1}: {e}")
 
-    # Kept for click-to-refine (and rescue downloads on upload failure).
+    # Kept for click-to-refine and the download button on every image tile.
     job["_full_images"][item["idx"]] = img_bytes
+    with job["_lock"]:
+        item["local_image"] = True
 
     try:
         job["_thumbs"][item["idx"]] = make_thumbnail(img_bytes)
@@ -697,6 +699,11 @@ def _run_one_image(job: dict, item: dict, images_folder_id: str):
             item["has_thumb"] = True
     except Exception:
         pass
+
+    if not images_folder_id:
+        with job["_lock"]:
+            item["status"] = "done"
+        return
 
     with job["_lock"]:
         item["status"] = "uploading"
@@ -718,7 +725,7 @@ def _run_one_image(job: dict, item: dict, images_folder_id: str):
                 f"image is still downloadable from its tile.")
 
 
-def _run_job(job: dict, folder_id: str):
+def _run_job(job: dict, folder_id: str = ""):
     brief = job["_brief"]
 
     def _set(**fields):
@@ -726,27 +733,37 @@ def _run_job(job: dict, folder_id: str):
             job.update(fields)
 
     try:
-        _set(phase="Creating Drive folders")
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        run_folder_name = f"{_slugify(brief['client_name'])}_{timestamp}"
-        run_folder = create_subfolder(folder_id, run_folder_name)
-        run_folder_id = run_folder["id"]
-        images_folder_id = create_subfolder(run_folder_id, "Images")["id"]
-        job["_images_folder_id"] = images_folder_id
+        run_folder_id = ""
+        images_folder_id = ""
         videos_folder_id = None
-        if brief["mode"] == "full":
-            videos_folder_id = create_subfolder(run_folder_id, "Videos")["id"]
+        if folder_id:
+            _set(phase="Creating Drive folders")
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            run_folder_name = f"{_slugify(brief['client_name'])}_{timestamp}"
+            run_folder = create_subfolder(folder_id, run_folder_name)
+            run_folder_id = run_folder["id"]
+            images_folder_id = create_subfolder(
+                run_folder_id, "Images")["id"]
+            job["_images_folder_id"] = images_folder_id
+            if brief["mode"] == "full":
+                videos_folder_id = create_subfolder(
+                    run_folder_id, "Videos")["id"]
 
-        _set(run_folder_link=run_folder.get("webViewLink", ""),
-             run_folder_name=run_folder_name)
+            _set(run_folder_link=run_folder.get("webViewLink", ""),
+                 run_folder_name=run_folder_name)
 
-        try:
-            sheet = _render_prompt_sheet(brief, job["_prompts"], job["items"])
-            link = upload_doc(run_folder_id, sheet, "Image Prompts")
-            _set(prompt_doc_link=link)
-        except Exception as e:
-            with job["_lock"]:
-                job["warnings"].append(f"Prompt sheet upload failed: {e}")
+            try:
+                sheet = _render_prompt_sheet(
+                    brief, job["_prompts"], job["items"])
+                link = upload_doc(run_folder_id, sheet, "Image Prompts")
+                _set(prompt_doc_link=link)
+            except Exception as e:
+                with job["_lock"]:
+                    job["warnings"].append(
+                        f"Prompt sheet upload failed: {e}")
+        else:
+            _set(phase="Preparing local downloads",
+                 run_folder_name="")
 
         copy_thread = None
         if brief["mode"] != "images":
@@ -832,6 +849,8 @@ def _run_refine(job: dict, item: dict, source_idx: int):
             item["status"] = "generating"
         img_bytes = generate_image(prompt, [src], quality=brief["quality"])
         job["_full_images"][item["idx"]] = img_bytes
+        with job["_lock"]:
+            item["local_image"] = True
         try:
             job["_thumbs"][item["idx"]] = make_thumbnail(img_bytes)
             with job["_lock"]:
@@ -933,10 +952,13 @@ def api_generate():
                                  "restart, or use Images + Ad Copy."}), 400
 
     folder_id = request.form.get("folder_id", "").strip()
-    folder_name = request.form.get("folder_name", "Drive folder").strip()
-    if not folder_id:
-        return jsonify({"error": "Pick a Drive folder to save the creatives into."}), 400
-    if not drive_is_available():
+    folder_name = request.form.get("folder_name", "").strip()
+    if brief["mode"] != "images" and not folder_id:
+        return jsonify({
+            "error": "Connect Google Drive and pick a folder for ad copy "
+                     "or the full pipeline. Images only can run without Drive."
+        }), 400
+    if folder_id and not drive_is_available():
         return jsonify({"error": "Google Drive not connected. Click "
                                  "'Connect Google Drive' first."}), 401
 
@@ -946,7 +968,8 @@ def api_generate():
 
     items = _build_all_prompts(brief)
     job = _new_job(brief, items)
-    job["folder_name"] = folder_name
+    job["folder_name"] = (folder_name or "Google Drive"
+                          if folder_id else "Local downloads")
     job["warnings"].extend(_brief_warnings(brief))
 
     threading.Thread(target=_run_job, args=(job, folder_id), daemon=True).start()
@@ -974,7 +997,7 @@ def api_job_thumb(job_id, idx):
 
 @app.route("/api/jobs/<job_id>/image/<int:idx>")
 def api_job_image(job_id, idx):
-    """Full-resolution rescue download for images whose Drive upload failed."""
+    """Download any generated image at full resolution."""
     job = JOBS.get(job_id)
     if not job or idx not in job["_full_images"]:
         return jsonify({"error": "No image."}), 404
