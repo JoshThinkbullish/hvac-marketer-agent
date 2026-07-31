@@ -46,7 +46,7 @@
     <div class="layout">
 
       <!-- ══════════ LEFT: FORM ══════════ -->
-      <form id="adForm" class="panel form-panel" autocomplete="off">
+      <form id="adForm" class="panel form-panel" autocomplete="off" enctype="multipart/form-data">
 
         <div class="section-label">1 · Client</div>
 
@@ -66,7 +66,7 @@
           </div>
         </div>
         <div class="field-hint field-hint--pullup">
-          Callout is used in ad copy and the “Marketer Quit” geo-tag only — image scenes stay location-generic.
+          The callout grounds image scenes in the real location — architecture, landscaping, climate and light — without printing the location name in the artwork.
           Required for ad copy / full pipeline.
         </div>
 
@@ -97,36 +97,14 @@
 
         <div class="field-row">
           <div class="field">
-            <label for="combo_system_input">HVAC System <span class="req">*</span></label>
-            {% if systems %}
-              <input type="hidden" id="system" name="system" />
-              <div class="combo" id="combo_system">
-                <div class="folder-search-wrap">
-                  <input type="text" class="folder-search-input" id="combo_system_input" placeholder="Search systems…" autocomplete="off" />
-                  <span class="combo-caret">▾</span>
-                </div>
-                <div class="folder-dropdown" hidden><div class="combo-list"></div></div>
-              </div>
-              <div class="field-hint">Added a file to <code>hvac_systems/</code>? Refresh this page to see it.</div>
-            {% else %}
-              <div class="no-assets">Drop unit images into <code>hvac_systems/</code> and refresh.</div>
-            {% endif %}
+            <label for="system_file">Equipment Image <span class="req">*</span></label>
+            <input class="file-input" type="file" id="system_file" name="system_file" accept="image/png,image/jpeg,image/webp" required />
+            <div class="field-hint">PNG, JPG or WebP, up to 15 MB. Use a descriptive filename such as <code>Lennox System.png</code> so the equipment brand is identified correctly.</div>
           </div>
           <div class="field">
-            <label for="combo_logo_input">Client Logo</label>
-            {% if logos %}
-              <input type="hidden" id="logo" name="logo" />
-              <div class="combo" id="combo_logo">
-                <div class="folder-search-wrap">
-                  <input type="text" class="folder-search-input" id="combo_logo_input" placeholder="Search logos…" autocomplete="off" />
-                  <span class="combo-caret">▾</span>
-                </div>
-                <div class="folder-dropdown" hidden><div class="combo-list"></div></div>
-              </div>
-              <div class="field-hint">Added a file to <code>logos/</code>? Refresh this page to see it.</div>
-            {% else %}
-              <div class="no-assets">Drop logos into <code>logos/</code> and refresh.</div>
-            {% endif %}
+            <label for="logo_file">Client Logo</label>
+            <input class="file-input" type="file" id="logo_file" name="logo_file" accept="image/png,image/jpeg,image/webp" />
+            <div class="field-hint">Optional. PNG with a transparent background works best; maximum 15 MB.</div>
           </div>
         </div>
 
@@ -148,7 +126,7 @@
             </div>
             <div class="folder-dropdown" hidden><div class="combo-list"></div></div>
           </div>
-          <div class="field-hint">The home shown in scene-based styles. “Vary” rotates a different setting into each image.</div>
+          <div class="field-hint">Controls the home type; the callout adapts its architecture, landscaping, climate and light to the chosen region.</div>
         </div>
 
         <div class="field">
@@ -245,7 +223,7 @@
 
         <div class="actions">
           <button type="button" id="previewBtn" class="btn btn--ghost">Preview prompts</button>
-          <button type="submit" id="submitBtn" class="btn btn--primary" {% if not systems or not connected %}disabled{% endif %}>
+          <button type="submit" id="submitBtn" class="btn btn--primary" {% if not connected %}disabled{% endif %}>
             Generate
           </button>
         </div>
@@ -321,11 +299,9 @@
       elevenlabs: {{ 'true' if elevenlabs_ok else 'false' }},
     };
     const RATES = { low: 0.006, medium: 0.053, high: 0.211 };  // gpt-image-2 $/image, approx
-    const SYSTEM_NAMES = {{ systems|map(attribute='name')|list|tojson }};
-    const LOGO_NAMES = {{ logos|map(attribute='name')|list|tojson }};
     const SETTINGS_MAP = {{ settings|tojson }};
 
-    // ── Searchable combo (system / logo / scene setting) ─────────────────
+    // ── Searchable combo (scene setting) ─────────────────────────────────
     const COMBOS = {};
     function initCombo(hiddenId, options) {
       const hidden = $(hiddenId);
@@ -378,16 +354,13 @@
       COMBOS[hiddenId] = { set, options };
     }
 
-    initCombo('system', SYSTEM_NAMES.map(n => ({ value: n, label: n })));
-    initCombo('logo', [{ value: '', label: 'No logo' },
-                       ...LOGO_NAMES.map(n => ({ value: n, label: n }))]);
     initCombo('setting', Object.entries(SETTINGS_MAP).map(([value, label]) => ({ value, label })));
 
     // ── Form persistence (localStorage) ─────────────────────────────────
     const STORE_KEY = 'hvac_brief_v1';
     const FIELD_IDS = ['business', 'website', 'callout', 'headline',
-                       'subheadline', 'features', 'dont_include', 'system',
-                       'logo', 'setting', 'count'];
+                       'subheadline', 'features', 'dont_include', 'setting',
+                       'count'];
 
     function saveBrief() {
       const data = { fields: {}, radios: {}, styles: [], folder: null };
@@ -485,11 +458,11 @@
       });
     });
 
-    // Hide logo placement when no logo picked
-    const logoSelect = $('logo');
+    // Hide logo placement when no logo is uploaded.
+    const logoSelect = $('logo_file');
     function syncLogoMode() {
       if (!logoSelect) return;
-      $('logoModeField').style.display = logoSelect.value ? '' : 'none';
+      $('logoModeField').style.display = logoSelect.files.length ? '' : 'none';
     }
     if (logoSelect) logoSelect.addEventListener('change', syncLogoMode);
     syncLogoMode();
@@ -812,10 +785,11 @@
       hideError();
 
       // Friendly pre-flight — catch the classics before a round-trip.
-      if (!$('system') || !$('system').value) {
-        showError('Pick an HVAC system in section 3.');
-        const si = $('combo_system_input');
-        if (si) { si.focus(); si.scrollIntoView({ block: 'center', behavior: 'smooth' }); }
+      if (!$('system_file').files.length) {
+        showError('Upload an equipment image in section 3.');
+        const si = $('system_file');
+        si.focus();
+        si.scrollIntoView({ block: 'center', behavior: 'smooth' });
         return;
       }
       if (!$('folder_id').value) {

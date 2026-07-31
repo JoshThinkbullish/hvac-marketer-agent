@@ -135,6 +135,20 @@ input:focus, textarea:focus, select:focus { border-color: var(--accent); }
 textarea { resize: vertical; }
 select option { background: var(--panel-2); }
 
+.file-input {
+  width: 100%; color: var(--muted); background: var(--panel-2);
+  border: 1px dashed #3a3f55; border-radius: 8px; padding: 8px;
+  font: inherit; font-size: 0.82rem; cursor: pointer;
+  transition: border-color 0.15s, background 0.15s;
+}
+.file-input:hover, .file-input:focus { border-color: var(--accent); background: #1a2138; outline: none; }
+.file-input::file-selector-button {
+  margin-right: 10px; padding: 7px 11px; border: 1px solid var(--border);
+  border-radius: 6px; background: #20263a; color: var(--text);
+  font: inherit; font-weight: 600; cursor: pointer;
+}
+.file-input::file-selector-button:hover { border-color: var(--accent); }
+
 .field-hint { font-size: 0.78rem; color: var(--faint); margin-top: 6px; line-height: 1.45; }
 .field-hint--pullup { margin-top: -8px; margin-bottom: 16px; }
 .field-hint--warn { color: var(--warn); }

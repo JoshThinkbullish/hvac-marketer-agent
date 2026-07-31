@@ -2,6 +2,8 @@ import io
 import logging
 import os
 import re
+import shutil
+import tempfile
 import threading
 import time
 import traceback
@@ -11,6 +13,7 @@ from datetime import datetime
 from pathlib import Path
 
 from dotenv import load_dotenv
+from PIL import Image, UnidentifiedImageError
 from flask import (
     Flask, jsonify, redirect, render_template, request, send_file, session,
     url_for,
@@ -60,10 +63,12 @@ GOOGLE_CLIENT_SECRET = os.environ.get("GOOGLE_CLIENT_SECRET", "")
 app = Flask(__name__)
 app.secret_key = os.environ.get("FLASK_SECRET_KEY", "dev-secret-key-change-me")
 
-HVAC_DIR = BASE_DIR / "hvac_systems"
-LOGO_DIR = BASE_DIR / "logos"
-# .avif deliberately excluded — Pillow 10.4 cannot decode it.
+# Browser uploads supported by Pillow and the image API.
 SUPPORTED_EXTS = {".png", ".jpg", ".jpeg", ".webp"}
+SUPPORTED_FORMATS = {"PNG", "JPEG", "WEBP"}
+MAX_UPLOAD_BYTES = 15 * 1024 * 1024
+MAX_UPLOAD_PIXELS = 50_000_000
+app.config["MAX_CONTENT_LENGTH"] = (MAX_UPLOAD_BYTES * 2) + (2 * 1024 * 1024)
 
 MAX_IMAGES = 20
 IMAGE_CONCURRENCY = 4
@@ -71,40 +76,15 @@ QUALITIES = {"low", "medium", "high"}
 MODES = {"images", "images_copy", "full"}
 
 
+@app.errorhandler(413)
+def upload_too_large(_error):
+    return jsonify({
+        "error": "Uploads are too large. Keep each image at 15 MB or less."
+    }), 413
+
+
 def _key_ok(name: str) -> bool:
     return bool(os.environ.get(name, "").strip())
-
-
-def _list_image_files(directory: Path) -> list[dict]:
-    if not directory.exists():
-        return []
-    seen: set[str] = set()
-    files = []
-    for f in sorted(directory.iterdir()):
-        if f.suffix.lower() not in SUPPORTED_EXTS or f.stem in seen:
-            continue
-        seen.add(f.stem)
-        files.append({"name": f.stem, "path": str(f)})
-    return files
-
-
-def get_hvac_systems() -> list[dict]:
-    return _list_image_files(HVAC_DIR)
-
-
-def get_logos() -> list[dict]:
-    return _list_image_files(LOGO_DIR)
-
-
-def _find_asset(directory: Path, stem: str) -> Path | None:
-    if not stem or not directory.exists():
-        return None
-    # sorted() so resolution matches the dropdown when stems collide.
-    return next(
-        (f for f in sorted(directory.iterdir())
-         if f.stem == stem and f.suffix.lower() in SUPPORTED_EXTS),
-        None,
-    )
 
 
 def _slugify(value: str, fallback: str = "client") -> str:
@@ -123,8 +103,6 @@ def _lines(raw: str) -> list[str]:
 def index():
     return render_template(
         "index.html",
-        systems=get_hvac_systems(),
-        logos=get_logos(),
         styles=list(STYLES.values()),
         settings=SETTINGS,
         default_styles=DEFAULT_STYLE_KEYS,
@@ -218,7 +196,74 @@ def auth_status():
 
 # ── Brief parsing (shared by preview + generate) ──────────────────────────────
 
-def _parse_brief(form) -> tuple[dict | None, str | None]:
+def _validate_image_upload(upload, label: str, required: bool = False) -> str | None:
+    """Validate a browser upload and return a friendly error, if any."""
+    if not upload or not (upload.filename or "").strip():
+        return f"Upload an {label.lower()}." if required else None
+
+    suffix = Path(upload.filename).suffix.lower()
+    if suffix not in SUPPORTED_EXTS:
+        return f"{label} must be a PNG, JPG, JPEG, or WebP image."
+
+    try:
+        upload.stream.seek(0, os.SEEK_END)
+        size = upload.stream.tell()
+        upload.stream.seek(0)
+        if size <= 0:
+            return f"{label} is empty."
+        if size > MAX_UPLOAD_BYTES:
+            return f"{label} must be 15 MB or smaller."
+        with Image.open(upload.stream) as image:
+            if image.format not in SUPPORTED_FORMATS:
+                return f"{label} must be a PNG, JPG, JPEG, or WebP image."
+            if image.width * image.height > MAX_UPLOAD_PIXELS:
+                return f"{label} is too large; use an image under 50 megapixels."
+            image.verify()
+    except (UnidentifiedImageError, OSError, ValueError):
+        return f"{label} is not a valid image file."
+    finally:
+        upload.stream.seek(0)
+    return None
+
+
+def _upload_name(upload, fallback: str) -> str:
+    stem = Path(upload.filename or "").stem.strip()
+    stem = re.sub(r"\s+", " ", stem)
+    return stem[:120] or fallback
+
+
+def _persist_brief_uploads(brief: dict, files) -> str | None:
+    """Copy request-scoped uploads to a job-owned temporary directory."""
+    upload_dir = Path(tempfile.mkdtemp(prefix="hvac-marketer-"))
+    try:
+        system_upload = files.get("system_file")
+        logo_upload = files.get("logo_file")
+
+        system_suffix = Path(system_upload.filename).suffix.lower()
+        system_path = upload_dir / f"equipment{system_suffix}"
+        system_upload.save(system_path)
+        brief["system_path"] = str(system_path)
+
+        if logo_upload and (logo_upload.filename or "").strip():
+            logo_suffix = Path(logo_upload.filename).suffix.lower()
+            logo_path = upload_dir / f"logo{logo_suffix}"
+            logo_upload.save(logo_path)
+            brief["logo_path"] = str(logo_path)
+
+        brief["_upload_dir"] = str(upload_dir)
+        return None
+    except Exception as exc:
+        shutil.rmtree(upload_dir, ignore_errors=True)
+        return f"Could not save the uploaded images: {exc}"
+
+
+def _cleanup_brief_uploads(brief: dict) -> None:
+    upload_dir = brief.get("_upload_dir", "")
+    if upload_dir:
+        shutil.rmtree(upload_dir, ignore_errors=True)
+
+
+def _parse_brief(form, files) -> tuple[dict | None, str | None]:
     client_name = form.get("business", "").strip()
     website     = form.get("website", "").strip()
     callout     = form.get("callout", "").strip()
@@ -226,8 +271,8 @@ def _parse_brief(form) -> tuple[dict | None, str | None]:
     subheadline = form.get("subheadline", "").strip()
     features     = _lines(form.get("features", ""))
     dont_include = _lines(form.get("dont_include", ""))
-    system_name = form.get("system", "").strip()
-    logo_name   = form.get("logo", "").strip()
+    system_upload = files.get("system_file")
+    logo_upload = files.get("logo_file")
     logo_mode   = form.get("logo_mode", "overlay").strip()
     setting     = form.get("setting", "vary").strip()
     quality     = form.get("quality", "high").strip()
@@ -243,8 +288,13 @@ def _parse_brief(form) -> tuple[dict | None, str | None]:
         return None, "Client name is required."
     if not headline:
         return None, "Headline (the main offer) is required."
-    if not system_name:
-        return None, "Pick an HVAC system."
+    upload_err = _validate_image_upload(
+        system_upload, "Equipment image", required=True)
+    if upload_err:
+        return None, upload_err
+    upload_err = _validate_image_upload(logo_upload, "Logo image")
+    if upload_err:
+        return None, upload_err
     if not style_keys:
         return None, "Pick at least one ad style."
     if not 1 <= count <= MAX_IMAGES:
@@ -259,14 +309,11 @@ def _parse_brief(form) -> tuple[dict | None, str | None]:
     if setting not in SETTINGS:
         setting = "vary"
 
-    system_path = _find_asset(HVAC_DIR, system_name)
-    if not system_path:
-        return None, f"System image not found for '{system_name}'."
-
-    logo_path = _find_asset(LOGO_DIR, logo_name) if logo_name else None
-    if logo_name and not logo_path:
-        return None, f"Logo image not found for '{logo_name}'."
-    if not logo_path:
+    system_name = _upload_name(system_upload, "HVAC equipment")
+    logo_name = (_upload_name(logo_upload, "Client logo")
+                 if logo_upload and (logo_upload.filename or "").strip()
+                 else "")
+    if not logo_name:
         logo_mode = "none"
     elif logo_mode not in {"ai", "overlay"}:
         logo_mode = "overlay"
@@ -280,9 +327,9 @@ def _parse_brief(form) -> tuple[dict | None, str | None]:
         "features": features,
         "dont_include": dont_include,
         "system_name": system_name,
-        "system_path": str(system_path),
+        "system_path": "",
         "logo_name": logo_name,
-        "logo_path": str(logo_path) if logo_path else "",
+        "logo_path": "",
         "logo_mode": logo_mode,
         "setting": setting,
         "quality": quality,
@@ -348,7 +395,7 @@ def _brief_warnings(brief: dict) -> list[str]:
 @app.route("/api/preview", methods=["POST"])
 def api_preview():
     """Build the exact prompts a run would use, without spending credits."""
-    brief, err = _parse_brief(request.form)
+    brief, err = _parse_brief(request.form, request.files)
     if err:
         return jsonify({"error": err}), 400
     items = _build_all_prompts(brief)
@@ -756,6 +803,8 @@ def _run_job(job: dict, folder_id: str):
             job["status"] = "error"
             job["phase"] = "Failed"
             job["_finished_at"] = time.time()
+    finally:
+        _cleanup_brief_uploads(brief)
 
 
 # ── Refine ─────────────────────────────────────────────────────────────────────
@@ -865,7 +914,7 @@ def api_job_refine(job_id, idx):
 
 @app.route("/api/generate", methods=["POST"])
 def api_generate():
-    brief, err = _parse_brief(request.form)
+    brief, err = _parse_brief(request.form, request.files)
     if err:
         return jsonify({"error": err}), 400
 
@@ -890,6 +939,10 @@ def api_generate():
     if not drive_is_available():
         return jsonify({"error": "Google Drive not connected. Click "
                                  "'Connect Google Drive' first."}), 401
+
+    err = _persist_brief_uploads(brief, request.files)
+    if err:
+        return jsonify({"error": err}), 400
 
     items = _build_all_prompts(brief)
     job = _new_job(brief, items)

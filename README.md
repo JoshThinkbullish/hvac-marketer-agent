@@ -4,8 +4,8 @@ One brief in → bulk ad creatives, Meta ad copy, video scripts, and voiceovers 
 
 ## What it does
 
-1. Fill in the client brief: name, offer (**Headline / Sub-headline / Also include / Don't include**), HVAC system image, logo.
-2. Pick **ad styles** (11 named templates), **image count**, **quality**, and a **scene setting** (modern suburban / luxury estate / beach house / country house / mountain home, or auto-vary — no hard-coded client locations). The summary panel shows a live estimated image cost per run.
+1. Fill in the client brief: name, callout location, offer (**Headline / Sub-headline / Also include / Don't include**), then upload the HVAC equipment image and optional client logo.
+2. Pick **ad styles** (11 named templates), **image count**, **quality**, and a **scene setting** (modern suburban / luxury estate / beach house / country house / mountain home, or auto-vary). The callout grounds the scene's architecture, landscaping, climate and light in the real location without rendering the location name as artwork text. The summary panel shows a live estimated image cost per run.
 3. Pick an output mode:
    - **Images only** — ad creatives + a prompt-sheet Google Doc
    - **Images + Ad Copy** — adds Meta primary text + landing page prompt
@@ -30,7 +30,7 @@ Use **Preview prompts** to inspect the exact prompts before spending image credi
 | Marketer Quit | organic | Ugly white background + red/black marker scrawl |
 | Product Close-Up | organic | DSLR macro of the unit with a clean caption |
 
-The 8 designed styles are the team's proven manual prompts used **word-for-word** — code only fills the slots (client, system, offer lines, don't-includes), so dollar amounts and terms never get paraphrased. Every style enforces: 1:1 aspect ratio, English-only text, no location names (the callout only appears in ad copy and the Marketer Quit geo-tag), no phone/website/"Call Today" CTAs, and the HVAC brand appearing only as the badge on the unit.
+The 8 designed styles are the team's proven manual prompts used **word-for-word** — code only fills the slots (client, system, offer lines, don't-includes), so dollar amounts and terms never get paraphrased. Every style enforces: 1:1 aspect ratio, English-only text, no visible location names (the location is visual scene guidance and the Marketer Quit style retains its geo-tag), no phone/website/"Call Today" CTAs, and the HVAC brand appearing only as the badge on the unit.
 
 ## Setup
 
@@ -51,12 +51,7 @@ FLASK_SECRET_KEY=<random>
 IMAGE_MODEL=gpt-image-2   # optional override
 ```
 
-Add assets:
-
-- `hvac_systems/` — one photo per unit; the filename (minus extension) becomes the dropdown label, e.g. `Lennox System.png`.
-- `logos/` — client logos (PNG with transparency works best).
-
-Run — double-click **start.bat** (or `.venv\Scripts\python app.py`). The browser opens to http://127.0.0.1:5000 automatically; click **Connect Google Drive** the first time, and generate. The brief, style selection, and Drive folder persist across page reloads, and a page refresh mid-run reattaches to the live progress automatically.
+Run — double-click **start.bat** (or `.venv\Scripts\python app.py`). The browser opens to http://127.0.0.1:5000 automatically; click **Connect Google Drive** the first time, upload a PNG/JPG/WebP equipment image (and optionally a logo), and generate. Each upload can be up to 15 MB. Use a descriptive equipment filename such as `Lennox System.png`, because its filename identifies the equipment brand in the prompt. The text brief, style selection, and Drive folder persist across page reloads; browsers intentionally do not persist file selections, so choose the two files again after a reload. A page refresh mid-run still reattaches to live progress because job-owned copies are retained until generation completes.
 
 ## Logo placement
 
