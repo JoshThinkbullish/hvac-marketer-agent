@@ -14,7 +14,7 @@
         <div class="topbar__logo">HM</div>
         <div>
           <h1>HVAC Marketer Agent</h1>
-          <p class="subtitle">Brief in → ad creatives, copy &amp; scripts out, straight to Drive.</p>
+          <p class="subtitle">Brief in → ad creatives out, ready to download or send to Drive.</p>
         </div>
       </div>
       <div class="topbar__drive">
@@ -192,17 +192,17 @@
 
         <div class="field">
           <div class="segmented segmented--stack" role="radiogroup">
-            <label class="seg"><input type="radio" name="mode" value="images" checked /><span>Images only<small>Just the ad creatives + prompt sheet</small></span></label>
+            <label class="seg"><input type="radio" name="mode" value="images" checked /><span>Images only<small>Download every creative from its tile · Drive optional</small></span></label>
             <label class="seg"><input type="radio" name="mode" value="images_copy" /><span>Images + Ad Copy<small>Adds Meta primary text &amp; landing page prompt</small></span></label>
             <label class="seg"><input type="radio" name="mode" value="full" /><span>Full pipeline<small>Adds scripts, voiceovers &amp; B-roll prompts</small></span></label>
           </div>
           <div class="field-hint field-hint--warn" id="modeWarning" hidden></div>
         </div>
 
-        <div class="section-label">5 · Destination</div>
+        <div class="section-label">5 · Destination <span class="label-note">optional for Images only</span></div>
 
         <div class="field">
-          <label>Drive Folder <span class="req">*</span></label>
+          <label>Google Drive Folder</label>
           <input type="hidden" id="folder_id" name="folder_id" />
           <input type="hidden" id="folder_name" name="folder_name" />
           <div class="folder-picker" id="folderPicker">
@@ -223,7 +223,7 @@
 
         <div class="actions">
           <button type="button" id="previewBtn" class="btn btn--ghost">Preview prompts</button>
-          <button type="submit" id="submitBtn" class="btn btn--primary" {% if not connected %}disabled{% endif %}>
+          <button type="submit" id="submitBtn" class="btn btn--primary">
             Generate
           </button>
         </div>
@@ -298,6 +298,7 @@
       anthropic: {{ 'true' if anthropic_ok else 'false' }},
       elevenlabs: {{ 'true' if elevenlabs_ok else 'false' }},
     };
+    const DRIVE_CONNECTED = {{ 'true' if connected else 'false' }};
     const RATES = { low: 0.006, medium: 0.053, high: 0.211 };  // gpt-image-2 $/image, approx
     const SETTINGS_MAP = {{ settings|tojson }};
 
@@ -408,7 +409,7 @@
       parts.push(`<div class="summary__big">${count} image${count === 1 ? '' : 's'}</div>`);
       parts.push(`<div class="summary__line">${styles.length ? styles.length + ' style' + (styles.length === 1 ? '' : 's') + ' · ' + quality + ' quality' : '<em>no styles selected</em>'}</div>`);
       parts.push(`<div class="summary__line">~$${(count * RATES[quality]).toFixed(2)} est. image cost</div>`);
-      const extras = { images: 'Prompt sheet doc', images_copy: 'Prompt sheet · Ad copy · Landing page prompt', full: 'Prompt sheet · Ad copy · Landing page prompt · 3 scripts + voiceovers · B-roll prompts' };
+      const extras = { images: 'Download each completed image directly from its tile', images_copy: 'Prompt sheet · Ad copy · Landing page prompt', full: 'Prompt sheet · Ad copy · Landing page prompt · 3 scripts + voiceovers · B-roll prompts' };
       parts.push(`<div class="summary__line summary__line--muted">${extras[mode]}</div>`);
       if (count && styles.length > count) {
         parts.push(`<div class="summary__line summary__line--warn">Only the first ${count} of ${styles.length} selected styles will be used — raise Images to ${styles.length} to cover all.</div>`);
@@ -425,6 +426,8 @@
       if (mode !== 'images') {
         $('callout').required = true;
         if (!KEYS.anthropic) msgs.push('ANTHROPIC_API_KEY is missing in .env — the ad-copy step of this mode will fail.');
+        if (!DRIVE_CONNECTED) msgs.push('Google Drive is required for ad copy and the full pipeline. Images only works without Drive.');
+        else if (!$('folder_id').value) msgs.push('Pick a Drive folder in section 5 for this mode.');
         if (!$('callout').value.trim()) msgs.push('Callout (city / region, section 1) is required for this mode.');
       } else {
         $('callout').required = false;
@@ -537,7 +540,7 @@
       loadFolders();
     {% else %}
       folderSearch.disabled = true;
-      folderHint.textContent = 'Connect Google Drive first to browse folders.';
+      folderHint.textContent = 'Optional for Images only — generate now and use the download button on each image. Connect Drive for ad copy or the full pipeline.';
       folderHint.hidden = false;
     {% endif %}
 
@@ -600,7 +603,10 @@
       lastJob = job;
       $('runPanel').hidden = false;
       $('runPhase').textContent = job.status === 'error' ? 'Run failed' : job.phase;
-      $('runMeta').textContent = `${job.client_name} → ${job.folder_name || 'Drive'} / ${job.run_folder_name || '…'}`;
+      const destination = job.run_folder_name
+        ? `${job.folder_name || 'Google Drive'} / ${job.run_folder_name}`
+        : (job.folder_name || 'Local downloads');
+      $('runMeta').textContent = `${job.client_name} → ${destination}`;
       $('cancelBtn').hidden = job.status !== 'running';
       $('cancelBtn').dataset.jobId = job.id;
 
@@ -618,9 +624,10 @@
         const img = item.has_thumb
           ? `<img src="/api/jobs/${esc(job.id)}/thumb/${item.idx}" alt="" loading="lazy" />`
           : `<div class="tile__ph ${meta.cls === 'is-working' ? 'tile__ph--pulse' : ''}"></div>`;
-        const link = item.drive_link
-          ? `<a href="${esc(item.drive_link)}" target="_blank" class="tile__open">Open ↗</a>`
-          : (item.local_image ? `<a href="/api/jobs/${esc(job.id)}/image/${item.idx}" class="tile__open">Save image ↓</a>` : '');
+        const driveLink = item.drive_link
+          ? `<a href="${esc(item.drive_link)}" target="_blank" class="tile__open">Drive ↗</a>` : '';
+        const downloadLink = item.local_image
+          ? `<a href="/api/jobs/${esc(job.id)}/image/${item.idx}" class="tile__download" title="Download full-resolution image" aria-label="Download image ${item.idx + 1}">↓</a>` : '';
         const refineBtn = canRefine
           ? `<button type="button" class="tile__refine" data-refine="${item.idx}" title="Type a tweak, hit Enter — generates a refined copy">✎ Refine</button>` : '';
         const refineBar = openRefine.idx === item.idx ? `
@@ -634,7 +641,7 @@
               <span class="tile__name">${String(item.idx + 1).padStart(2, '0')} ${esc(item.style_label)}</span>
               <span class="tile__status">${meta.label}</span>
             </div>
-            ${refineBtn}${link}${refineBar}${err}
+            ${refineBtn}${driveLink}${downloadLink}${refineBar}${err}
           </div>`;
       }).join('');
 
@@ -756,7 +763,7 @@
         const res = await fetch(`/api/jobs/${jobId}`);
         if (res.status === 404) {
           localStorage.removeItem('activeJob');
-          showError('This run expired from server memory — check the Drive folder for its output.');
+          showError('This run expired from server memory. Completed local images are no longer available to download.');
           resetSubmit();
           return;
         }
@@ -774,7 +781,7 @@
         if (failures < 5) {
           pollTimer = setTimeout(() => poll(jobId, failures + 1), 3000);
         } else {
-          showError(err.message + ' — stopped checking; the run may still be finishing in Drive.');
+          showError(err.message + ' — stopped checking; the run may still be finishing. Keep this page open and retry shortly.');
           resetSubmit();
         }
       }
@@ -792,8 +799,9 @@
         si.scrollIntoView({ block: 'center', behavior: 'smooth' });
         return;
       }
-      if (!$('folder_id').value) {
-        showError('Pick a Drive folder in section 5 before generating.');
+      const mode = form.querySelector('input[name="mode"]:checked').value;
+      if (mode !== 'images' && !$('folder_id').value) {
+        showError('Connect Google Drive and pick a folder in section 5 for ad copy / full pipeline. Images only works without Drive.');
         folderSearch.focus();
         folderSearch.scrollIntoView({ block: 'center', behavior: 'smooth' });
         return;
@@ -802,7 +810,6 @@
         showError('Pick at least one ad style in section 3.');
         return;
       }
-      const mode = form.querySelector('input[name="mode"]:checked').value;
       if (mode !== 'images' && !$('callout').value.trim()) {
         showError('Callout (city / region, section 1) is required for ad copy / full pipeline.');
         $('callout').focus();

@@ -7,10 +7,10 @@ One brief in → bulk ad creatives, Meta ad copy, video scripts, and voiceovers 
 1. Fill in the client brief: name, callout location, offer (**Headline / Sub-headline / Also include / Don't include**), then upload the HVAC equipment image and optional client logo.
 2. Pick **ad styles** (11 named templates), **image count**, **quality**, and a **scene setting** (modern suburban / luxury estate / beach house / country house / mountain home, or auto-vary). The callout grounds the scene's architecture, landscaping, climate and light in the real location without rendering the location name as artwork text. The summary panel shows a live estimated image cost per run.
 3. Pick an output mode:
-   - **Images only** — ad creatives + a prompt-sheet Google Doc
+   - **Images only** — ad creatives with a full-resolution download button on every image tile; Google Drive is optional
    - **Images + Ad Copy** — adds Meta primary text + landing page prompt
    - **Full pipeline** — adds 2 brainrot scripts, 1 story script, ElevenLabs voiceovers, and story B-roll prompts
-4. Choose a Drive folder and hit **Generate**. Images render in parallel with live per-image progress; everything lands in a timestamped run folder (`Images/`, `Videos/`).
+4. Hit **Generate** and download completed images directly from their tiles. If Google Drive is connected and a folder is selected, the app also saves the run in a timestamped folder (`Images/`, `Videos/`). Drive remains required for the ad-copy and full-pipeline document outputs.
 
 Use **Preview prompts** to inspect the exact prompts before spending image credits.
 
