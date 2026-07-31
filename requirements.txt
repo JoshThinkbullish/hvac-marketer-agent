@@ -9,3 +9,4 @@ google-auth-httplib2>=0.2.0
 google-auth>=2.30.0
 google-auth-oauthlib>=1.2.1
 Pillow>=10.4.0
+gunicorn
