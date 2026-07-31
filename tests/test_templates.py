@@ -32,8 +32,12 @@ for key, style in STYLES.items():
                 check("FREE WiFi Smart Thermostat" in p, f"{tag}: feature missing")
                 check("thermostat image" in p, f"{tag}: user dont_include missing")
                 check("English" in p, f"{tag}: English rule missing")
-                if key != "ugly_marker":
-                    check("Palm Beach" not in p, f"{tag}: location leaked into non-marker style")
+                check('callout "Palm Beach County"' in p,
+                      f"{tag}: location grounding missing")
+                check("architecture" in p and "vegetation" in p and "daylight" in p,
+                      f"{tag}: regional visual cues missing")
+                check("Do not display the location name as text" in p,
+                      f"{tag}: visible-location guard missing")
                 if style.family == "designed":
                     check("MAKE SURE the image is 1:1 aspect ratio" in p, f"{tag}: footer missing")
                     check("Dont include name of country or city / location" in p, f"{tag}: location dont-include missing")
@@ -73,6 +77,16 @@ check("(Palm Beach County homeowners only)" in p, "ugly_marker: geo-gate missing
 no_callout = dict(base, callout="")
 p2 = build_prompt("ugly_marker", OfferContext(**no_callout))
 check("homeowners only" not in p2, "ugly_marker: geo-gate present without callout")
+check("Location grounding:" not in p2, "location block present without callout")
+
+# Dallas callouts ground the visual scene in Dallas while staying out of artwork text.
+dallas = dict(base, callout="Dallas")
+p3 = build_prompt("home_install", OfferContext(**dallas))
+check('callout "Dallas"' in p3, "Dallas callout missing from scene guidance")
+check("authentically characteristic of that location" in p3,
+      "Dallas regional-authenticity instruction missing")
+check("Dont include name of country or city / location" in p3,
+      "Dallas visible text exclusion missing")
 
 # minimal brief
 minimal = OfferContext(client_name="A", system_name="Bryant", headline="$99 Tune-Up")

@@ -37,7 +37,7 @@ class OfferContext:
     subheadline: str = ""               # secondary offer
     features: list[str] = field(default_factory=list)   # "also include" items
     dont_include: list[str] = field(default_factory=list)
-    callout: str = ""                   # city/region — only used by ugly_marker geo-gate
+    callout: str = ""                   # city/region — visual grounding + marker geo-gate
     setting: str = "vary"               # SETTINGS key
     logo_mode: str = "overlay"          # "ai" | "overlay" | "none"
     variant: int = 0                    # 0-based repeat index of THIS style in a run
@@ -120,6 +120,23 @@ def _scene_for(ctx: OfferContext) -> str:
 
 def _noun_for(ctx: OfferContext) -> str:
     return _SETTING_NOUNS[_setting_key(ctx)]
+
+
+def _location_context(ctx: OfferContext) -> str:
+    """Ground scenes in the callout without turning it into visible ad copy."""
+    if not ctx.callout.strip():
+        return ""
+    return (
+        f"Location grounding: Treat the callout {_q(ctx.callout)} as visual "
+        f"setting context. Make every visible home, architecture, exterior "
+        f"material, roofline, streetscape, vegetation, terrain, weather, sky, and "
+        f"quality of daylight feel authentically characteristic of that "
+        f"location. Keep the selected scene type, but adapt its regional "
+        f"details to the callout. Do not display the location name as text "
+        f"anywhere unless another instruction explicitly requires the "
+        f"quoted homeowners-only callout; this is scene guidance, not ad "
+        f"copy. If the style has no environment, do not invent one."
+    )
 
 
 # ── Shared blocks (designed family — operator's exact prompt format) ──────────
@@ -612,4 +629,4 @@ def build_prompt(style_key: str, ctx: OfferContext) -> str:
     style = STYLES.get(style_key)
     if style is None:
         raise KeyError(f"Unknown ad style: {style_key!r}")
-    return style.build(ctx)
+    return _assemble(style.build(ctx), _location_context(ctx))
