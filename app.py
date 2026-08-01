@@ -1,4 +1,7 @@
 import io
+import hashlib
+import hmac
+import json
 import logging
 import os
 import re
@@ -55,6 +58,7 @@ from agent.image_generator import (
     generate_image,
     make_thumbnail,
 )
+from agent.batch_store import BatchStore, default_data_root
 from agent.voice_generator import DEFAULT_VOICE_ID, generate_voiceover
 
 GOOGLE_CLIENT_ID     = os.environ.get("GOOGLE_CLIENT_ID", "")
@@ -66,20 +70,29 @@ app.secret_key = os.environ.get("FLASK_SECRET_KEY", "dev-secret-key-change-me")
 # Browser uploads supported by Pillow and the image API.
 SUPPORTED_EXTS = {".png", ".jpg", ".jpeg", ".webp"}
 SUPPORTED_FORMATS = {"PNG", "JPEG", "WEBP"}
+SUPPORTED_MIMES = {"image/png", "image/jpeg", "image/webp"}
 MAX_UPLOAD_BYTES = 15 * 1024 * 1024
 MAX_UPLOAD_PIXELS = 50_000_000
-app.config["MAX_CONTENT_LENGTH"] = (MAX_UPLOAD_BYTES * 2) + (2 * 1024 * 1024)
+app.config["MAX_CONTENT_LENGTH"] = (MAX_UPLOAD_BYTES * 10) + (2 * 1024 * 1024)
 
 MAX_IMAGES = 20
 IMAGE_CONCURRENCY = 4
 QUALITIES = {"low", "medium", "high"}
 MODES = {"images", "images_copy", "full"}
+REFERENCE_ROLES = {
+    "primary_equipment", "supporting_product", "logo", "general_reference",
+}
+RETENTION_DAYS = max(7, int(os.environ.get("HVAC_RETENTION_DAYS", "7")))
+SERVICE_API_KEY = os.environ.get("HVAC_SERVICE_API_KEY", "").strip()
+STORE = BatchStore(default_data_root(BASE_DIR))
+STORE.prune(RETENTION_DAYS)
 
 
 @app.errorhandler(413)
 def upload_too_large(_error):
     return jsonify({
-        "error": "Uploads are too large. Keep each image at 15 MB or less."
+        "error": "Uploads are too large. Keep each image at 15 MB or less.",
+        "code": "uploads_too_large",
     }), 413
 
 
@@ -101,6 +114,9 @@ def _lines(raw: str) -> list[str]:
 
 @app.route("/")
 def index():
+    # A signed Flask session distinguishes the browser UI from external
+    # service callers. External callers must use the service bearer token.
+    session["ui_access"] = True
     return render_template(
         "index.html",
         styles=list(STYLES.values()),
@@ -204,6 +220,8 @@ def _validate_image_upload(upload, label: str, required: bool = False) -> str | 
     suffix = Path(upload.filename).suffix.lower()
     if suffix not in SUPPORTED_EXTS:
         return f"{label} must be a PNG, JPG, JPEG, or WebP image."
+    if (upload.mimetype or "").lower() not in SUPPORTED_MIMES:
+        return f"{label} has an unsupported MIME type."
 
     try:
         upload.stream.seek(0, os.SEEK_END)
@@ -418,9 +436,97 @@ PRUNE_GRACE_SECONDS = 120   # keep finished jobs pollable for at least this long
 SHUTTING_DOWN = threading.Event()
 
 
+def _sha256(data: bytes) -> str:
+    return hashlib.sha256(data).hexdigest()
+
+
+def _durabilize_inputs(brief: dict, batch_id: str) -> None:
+    """Copy request-owned inputs into the durable batch directory."""
+    assets = STORE.batch_dir(batch_id) / "assets"
+    assets.mkdir(parents=True, exist_ok=True)
+    source_system = Path(brief["system_path"])
+    system_path = assets / f"original-equipment{source_system.suffix.lower()}"
+    shutil.copy2(source_system, system_path)
+    brief["system_path"] = str(system_path)
+    brief["original_equipment_path"] = str(system_path)
+    brief["active_equipment_path"] = str(system_path)
+
+    if brief.get("logo_path"):
+        source_logo = Path(brief["logo_path"])
+        logo_path = assets / f"logo{source_logo.suffix.lower()}"
+        shutil.copy2(source_logo, logo_path)
+        brief["logo_path"] = str(logo_path)
+
+
+def _batch_payload(job: dict) -> dict:
+    public = _public_job(job)
+    # The durable snapshot retains server-only file paths; API responses use
+    # image URLs and never expose the host filesystem.
+    public["items"] = [dict(item) for item in job["items"]]
+    public["_brief"] = {
+        k: v for k, v in job["_brief"].items() if k != "_upload_dir"
+    }
+    public["_prompts"] = {str(k): v for k, v in job["_prompts"].items()}
+    public["_images_folder_id"] = job.get("_images_folder_id", "")
+    public["_main_done"] = job.get("_main_done", False)
+    return public
+
+
+def _persist_job(job: dict) -> None:
+    STORE.save_batch(
+        job["id"], job["status"], job["created"], _batch_payload(job)
+    )
+
+
+def _restore_job(payload: dict) -> dict:
+    brief = payload.pop("_brief")
+    prompts = {
+        int(k): v for k, v in payload.pop("_prompts", {}).items()
+    }
+    images_folder_id = payload.pop("_images_folder_id", "")
+    main_done = payload.pop("_main_done", True)
+    job = dict(payload)
+    job["_brief"] = brief
+    job["_prompts"] = prompts
+    job["_thumbs"] = {}
+    job["_full_images"] = {}
+    job["_finished_at"] = time.time()
+    job["_main_done"] = main_done
+    job["_refines"] = 0
+    job["_images_folder_id"] = images_folder_id
+    job["_cancel"] = threading.Event()
+    job["_lock"] = threading.RLock()
+    if job["status"] == "running":
+        job["status"] = "error"
+        job["phase"] = "Interrupted"
+        job["error"] = (
+            "The server restarted before this operation completed. "
+            "Completed images remain available."
+        )
+    return job
+
+
+def _get_job(job_id: str) -> dict | None:
+    job = JOBS.get(job_id)
+    if job:
+        return job
+    payload = STORE.load_batch(job_id)
+    if not payload:
+        return None
+    job = _restore_job(payload)
+    with JOBS_LOCK:
+        JOBS.setdefault(job_id, job)
+        job = JOBS[job_id]
+    _persist_job(job)
+    return job
+
+
 def _new_job(brief: dict, items: list[dict]) -> dict:
+    batch_id = uuid.uuid4().hex[:12]
+    _durabilize_inputs(brief, batch_id)
     job = {
-        "id": uuid.uuid4().hex[:12],
+        "id": batch_id,
+        "batch_id": batch_id,
         "status": "running",
         "phase": "Starting",
         "created": datetime.now().isoformat(timespec="seconds"),
@@ -432,6 +538,8 @@ def _new_job(brief: dict, items: list[dict]) -> dict:
         "items": [
             {
                 "idx": it["idx"],
+                "item_id": f"item_{uuid.uuid4().hex[:16]}",
+                "position": it["idx"] + 1,
                 "style_key": it["style_key"],
                 "style_label": it["style_label"],
                 "status": "queued",
@@ -439,6 +547,12 @@ def _new_job(brief: dict, items: list[dict]) -> dict:
                 "drive_link": "",
                 "has_thumb": False,
                 "local_image": False,
+                "current_file": "",
+                "sha256": "",
+                "version": 1,
+                "parent_item_id": None,
+                "parent_version": None,
+                "changed": False,
             }
             for it in items
         ],
@@ -450,6 +564,7 @@ def _new_job(brief: dict, items: list[dict]) -> dict:
         },
         "warnings": [],
         "error": "",
+        "revision_history": [],
         "_brief": brief,
         "_prompts": {it["idx"]: it["prompt"] for it in items},
         "_thumbs": {},
@@ -459,7 +574,7 @@ def _new_job(brief: dict, items: list[dict]) -> dict:
         "_refines": 0,
         "_images_folder_id": "",
         "_cancel": threading.Event(),
-        "_lock": threading.Lock(),
+        "_lock": threading.RLock(),
     }
     with JOBS_LOCK:
         JOBS[job["id"]] = job
@@ -484,11 +599,24 @@ def _new_job(brief: dict, items: list[dict]) -> dict:
         )[3:]
         for old in keep:
             old["_full_images"] = {}
+    _persist_job(job)
     return job
 
 
 def _public_job(job: dict) -> dict:
-    return {k: v for k, v in job.items() if not k.startswith("_")}
+    public = {k: v for k, v in job.items() if not k.startswith("_")}
+    public["items"] = []
+    for item in job["items"]:
+        exposed = {
+            key: value for key, value in item.items()
+            if key != "current_file"
+        }
+        exposed["image_url"] = (
+            f"/api/jobs/{job['id']}/image/{item['idx']}"
+            if item.get("current_file") else ""
+        )
+        public["items"].append(exposed)
+    return public
 
 
 # ── Pipeline ───────────────────────────────────────────────────────────────────
@@ -688,10 +816,19 @@ def _run_one_image(job: dict, item: dict, images_folder_id: str = ""):
                 job["warnings"].append(
                     f"Logo overlay failed for image {item['idx'] + 1}: {e}")
 
-    # Kept for click-to-refine and the download button on every image tile.
+    item_dir = STORE.batch_dir(job["id"]) / "items" / item["item_id"]
+    item_dir.mkdir(parents=True, exist_ok=True)
+    image_path = item_dir / "v1.png"
+    image_path.write_bytes(img_bytes)
+
+    # Kept as a hot cache; the durable file is the source of truth.
     job["_full_images"][item["idx"]] = img_bytes
     with job["_lock"]:
         item["local_image"] = True
+        item["current_file"] = str(image_path)
+        item["sha256"] = _sha256(img_bytes)
+        item["version"] = 1
+        item["changed"] = False
 
     try:
         job["_thumbs"][item["idx"]] = make_thumbnail(img_bytes)
@@ -703,6 +840,7 @@ def _run_one_image(job: dict, item: dict, images_folder_id: str = ""):
     if not images_folder_id:
         with job["_lock"]:
             item["status"] = "done"
+            _persist_job(job)
         return
 
     with job["_lock"]:
@@ -713,6 +851,7 @@ def _run_one_image(job: dict, item: dict, images_folder_id: str = ""):
         with job["_lock"]:
             item["drive_link"] = link
             item["status"] = "done"
+            _persist_job(job)
     except Exception as e:
         # The image is paid for and already kept in _full_images — surface
         # a download link instead of discarding it.
@@ -723,6 +862,7 @@ def _run_one_image(job: dict, item: dict, images_folder_id: str = ""):
             job["warnings"].append(
                 f"Upload failed for image {item['idx'] + 1}: {e} — the "
                 f"image is still downloadable from its tile.")
+            _persist_job(job)
 
 
 def _run_job(job: dict, folder_id: str = ""):
@@ -821,112 +961,510 @@ def _run_job(job: dict, folder_id: str = ""):
             job["phase"] = "Failed"
             job["_finished_at"] = time.time()
     finally:
+        _persist_job(job)
         _cleanup_brief_uploads(brief)
 
 
-# ── Refine ─────────────────────────────────────────────────────────────────────
+# ── Durable batch revisions ────────────────────────────────────────────────────
 
-def _finalize_refine(job: dict):
+REVISION_LOCKS: dict[str, threading.Lock] = {}
+REVISION_LOCKS_GUARD = threading.Lock()
+
+
+def _revision_lock(batch_id: str) -> threading.Lock:
+    with REVISION_LOCKS_GUARD:
+        return REVISION_LOCKS.setdefault(batch_id, threading.Lock())
+
+
+def _service_caller() -> bool:
+    header = request.headers.get("Authorization", "")
+    supplied = header[7:].strip() if header.lower().startswith("bearer ") else ""
+    return bool(
+        SERVICE_API_KEY and supplied
+        and hmac.compare_digest(supplied, SERVICE_API_KEY)
+    )
+
+
+def _revision_authorized(service_endpoint: bool) -> bool:
+    if service_endpoint:
+        return _service_caller()
+    return bool(session.get("ui_access"))
+
+
+def _revision_error(message: str, code: str, status: int):
+    return jsonify({"error": message, "code": code}), status
+
+
+def _revision_public_items(job: dict) -> list[dict]:
+    return [
+        {
+            "item_id": item["item_id"],
+            "position": item["position"],
+            "style_id": item["style_key"],
+            "style_label": item["style_label"],
+            "changed": bool(item.get("changed")),
+            "version": item.get("version", 1),
+            "image_url": (
+                f"/api/jobs/{job['id']}/image/{item['idx']}"
+                if item.get("current_file") else ""
+            ),
+            "sha256": item.get("sha256", ""),
+            "parent_item_id": item.get("parent_item_id"),
+            "parent_version": item.get("parent_version"),
+        }
+        for item in sorted(job["items"], key=lambda value: value["position"])
+    ]
+
+
+def _revision_prompt(revision: dict, item: dict) -> str:
+    replacements = revision.get("text_replacements", [])
+    if revision["mode"] == "replace_equipment":
+        return (
+            "Edit the first reference, which is a finished HVAC advertising "
+            "creative. Replace only the HVAC equipment shown with the HVAC "
+            "equipment in the second reference. Preserve the composition, "
+            "background, client logo, offer, headline, subheadline, feature "
+            "copy, exclusions, colours, spacing, and every other visible "
+            "element as closely as possible. Preserve all advertising wording "
+            "exactly. Do not add, remove, or rewrite any advertising text, "
+            "headline, badge, feature, manufacturer name, or model name. The "
+            "equipment reference is visual only. Square 1:1, English only."
+        )
+
+    parts = [
+        "Edit the first reference, which is the existing finished HVAC ad.",
+        f"Requested edit: {revision['instruction']}",
+        "Preserve everything not explicitly requested: the existing HVAC "
+        "equipment, client logo, offer wording, all other text, background, "
+        "layout, colours, and overall design. Do not introduce any additional "
+        "headline, subheadline, badge, feature, manufacturer, or model copy.",
+    ]
+    if revision.get("reference_manifest"):
+        descriptions = []
+        for entry in revision["reference_manifest"]:
+            descriptions.append(
+                f"reference {entry['file_index'] + 2} is "
+                f"{entry['role']} labelled {entry.get('label') or 'unlabelled'}"
+            )
+        parts.append(
+            "Use the additional visual references only for their stated roles: "
+            + "; ".join(descriptions) + ". A supporting product must be added "
+            "naturally and must never replace the HVAC equipment."
+        )
+    for replacement in replacements:
+        parts.append(
+            f'Replace only the exact text "{replacement["from"]}" with '
+            f'"{replacement["to"]}". Preserve all other text exactly.'
+        )
+    parts.append("Square 1:1 aspect ratio, fully in English.")
+    return "\n".join(parts)
+
+
+def _run_revision_item(job: dict, revision: dict, item: dict) -> None:
+    source_path = Path(item.get("current_file", ""))
+    if not source_path.is_file():
+        raise RuntimeError(f"Source image {item['position']} is unavailable.")
+    source_version = item.get("version", 1)
+    refs: list[str | bytes] = [str(source_path)]
+    if revision["mode"] == "replace_equipment":
+        refs.append(revision["equipment_path"])
+    else:
+        refs.extend(revision.get("reference_paths", []))
+
+    prompt = _revision_prompt(revision, item)
+    revision.setdefault("prompts", {})[item["item_id"]] = prompt
     with job["_lock"]:
-        job["_refines"] -= 1
-        if job["_refines"] <= 0 and job["_main_done"]:
-            done_images = sum(1 for i in job["items"] if i["status"] == "done")
-            job["status"] = "done" if done_images else "error"
-            if not done_images and not job["error"]:
-                job["error"] = "Nothing was generated — see warnings."
-            job["phase"] = "Complete"
-            job["_finished_at"] = time.time()
+        item["status"] = "generating"
+        item["error"] = ""
+    image_bytes = generate_image(
+        prompt, refs, quality=revision["quality"]
+    )
+    version = source_version + 1
+    item_dir = STORE.batch_dir(job["id"]) / "items" / item["item_id"]
+    item_dir.mkdir(parents=True, exist_ok=True)
+    image_path = item_dir / f"v{version}.png"
+    image_path.write_bytes(image_bytes)
 
+    drive_link = item.get("drive_link", "")
+    if job.get("_images_folder_id"):
+        with job["_lock"]:
+            item["status"] = "uploading"
+        filename = (
+            f"{item['position']:02d}_{item['style_key']}_v{version}.png"
+        )
+        drive_link = upload_to_folder(
+            job["_images_folder_id"], image_bytes, filename
+        )
 
-def _run_refine(job: dict, item: dict, source_idx: int):
-    brief = job["_brief"]
-    prompt = job["_prompts"][item["idx"]]
-    src = job["_full_images"].get(source_idx)
-    try:
-        if src is None:
-            raise RuntimeError("Source image is no longer available.")
-        with job["_lock"]:
-            item["status"] = "generating"
-        img_bytes = generate_image(prompt, [src], quality=brief["quality"])
-        job["_full_images"][item["idx"]] = img_bytes
-        with job["_lock"]:
-            item["local_image"] = True
+    with job["_lock"]:
+        item.update({
+            "status": "done",
+            "local_image": True,
+            "has_thumb": True,
+            "current_file": str(image_path),
+            "sha256": _sha256(image_bytes),
+            "version": version,
+            "parent_item_id": item["item_id"],
+            "parent_version": source_version,
+            "changed": True,
+            "drive_link": drive_link,
+        })
+        job["_full_images"][item["idx"]] = image_bytes
         try:
-            job["_thumbs"][item["idx"]] = make_thumbnail(img_bytes)
-            with job["_lock"]:
-                item["has_thumb"] = True
+            job["_thumbs"][item["idx"]] = make_thumbnail(image_bytes)
         except Exception:
             pass
-        folder = job["_images_folder_id"]
-        if folder:
-            with job["_lock"]:
-                item["status"] = "uploading"
-            filename = f"{item['idx'] + 1:02d}_{item['style_key']}_refined.png"
-            link = upload_to_folder(folder, img_bytes, filename)
-            with job["_lock"]:
-                item["drive_link"] = link
-                item["status"] = "done"
-        else:
-            with job["_lock"]:
-                item["local_image"] = True
-                item["status"] = "done"
-    except Exception as e:
-        log.error("Refine of image %d failed: %s", source_idx + 1, e)
+
+
+def _run_revision(job: dict, revision: dict) -> None:
+    with _revision_lock(job["id"]):
+        revision["status"] = "running"
+        STORE.save_revision(revision)
         with job["_lock"]:
-            item["status"] = "failed"
-            item["error"] = str(e)
-            if item["idx"] in job["_full_images"]:
-                item["local_image"] = True
-            job["warnings"].append(
-                f"Refine of image {source_idx + 1} failed: {e}")
-    finally:
-        _finalize_refine(job)
+            job["status"] = "running"
+            job["phase"] = (
+                "Replacing equipment"
+                if revision["mode"] == "replace_equipment"
+                else "Editing selected images"
+            )
+            job["error"] = ""
+            for item in job["items"]:
+                item["changed"] = False
+        _persist_job(job)
+
+        selected = (
+            list(job["items"])
+            if revision["mode"] == "replace_equipment"
+            else [
+                item for item in job["items"]
+                if item["item_id"] in revision["selected_item_ids"]
+            ]
+        )
+        errors: list[str] = []
+        with ThreadPoolExecutor(max_workers=IMAGE_CONCURRENCY) as pool:
+            futures = {
+                pool.submit(_run_revision_item, job, revision, item): item
+                for item in selected
+            }
+            for future, item in futures.items():
+                try:
+                    future.result()
+                except Exception as exc:
+                    log.error(
+                        "Revision %s image %s failed: %s",
+                        revision["revision_id"], item["position"], exc,
+                    )
+                    errors.append(f"Image {item['position']}: {exc}")
+                    with job["_lock"]:
+                        item["status"] = "done"
+                        item["error"] = str(exc)
+                        item["changed"] = False
+
+        if revision["mode"] == "replace_equipment" and not errors:
+            with job["_lock"]:
+                job["_brief"]["active_equipment_path"] = revision[
+                    "equipment_path"
+                ]
+                job["_brief"]["system_path"] = revision["equipment_path"]
+
+        revision["status"] = "error" if errors else "done"
+        revision["error"] = "; ".join(errors)
+        revision["items"] = _revision_public_items(job)
+        with job["_lock"]:
+            job["status"] = "error" if errors else "done"
+            job["phase"] = "Revision failed" if errors else "Complete"
+            job["error"] = revision["error"]
+            job["_finished_at"] = time.time()
+            for entry in job["revision_history"]:
+                if entry["revision_id"] == revision["revision_id"]:
+                    entry["status"] = revision["status"]
+                    entry["error"] = revision["error"]
+                    break
+        _persist_job(job)
+        STORE.save_revision(revision)
+
+
+def _parse_json_field(name: str, default):
+    raw = request.form.get(name, "")
+    if not raw:
+        return default
+    try:
+        return json.loads(raw)
+    except (TypeError, json.JSONDecodeError):
+        raise ValueError(f"{name} must be valid JSON.")
+
+
+def _save_revision_upload(upload, path: Path) -> str:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    upload.save(path)
+    return str(path)
+
+
+def _queue_revision(
+    job: dict, *, mode: str, selected_item_ids: list[str],
+    instruction: str, quality: str, idempotency_key: str,
+    equipment_upload=None, reference_uploads=None,
+    reference_manifest=None, text_replacements=None,
+) -> tuple[dict, bool]:
+    revision_id = f"rev_{uuid.uuid4().hex[:16]}"
+    revision_dir = STORE.revision_dir(job["id"], revision_id)
+    equipment_path = ""
+    equipment_name = ""
+    if equipment_upload:
+        suffix = Path(equipment_upload.filename).suffix.lower()
+        equipment_path = _save_revision_upload(
+            equipment_upload, revision_dir / f"equipment{suffix}"
+        )
+        equipment_name = _upload_name(equipment_upload, "HVAC equipment")
+
+    reference_paths = []
+    for index, upload in enumerate(reference_uploads or []):
+        suffix = Path(upload.filename).suffix.lower()
+        reference_paths.append(_save_revision_upload(
+            upload, revision_dir / f"reference-{index}{suffix}"
+        ))
+
+    revision = {
+        "revision_id": revision_id,
+        "batch_id": job["id"],
+        "status": "queued",
+        "mode": mode,
+        "selected_item_ids": selected_item_ids,
+        "instruction": instruction,
+        "quality": quality,
+        "equipment_path": equipment_path,
+        "equipment_name": equipment_name,
+        "reference_paths": reference_paths,
+        "reference_manifest": reference_manifest or [],
+        "text_replacements": text_replacements or [],
+        "idempotency_key": idempotency_key,
+        "created_at": datetime.now().astimezone().isoformat(),
+        "error": "",
+        "items": _revision_public_items(job),
+        "prompts": {},
+    }
+    revision, created = STORE.create_revision(revision)
+    if not created:
+        return revision, False
+
+    with job["_lock"]:
+        job["revision_history"].append({
+            "revision_id": revision["revision_id"],
+            "status": "queued",
+            "mode": mode,
+            "created_at": revision["created_at"],
+            "error": "",
+        })
+        job["status"] = "running"
+        job["phase"] = "Revision queued"
+        job["error"] = ""
+        _persist_job(job)
+    threading.Thread(
+        target=_run_revision, args=(job, revision), daemon=True
+    ).start()
+    return revision, True
+
+
+@app.route("/api/jobs/<job_id>/revisions", methods=["POST"])
+@app.route("/api/ui/jobs/<job_id>/revisions", methods=["POST"])
+def api_create_revision(job_id):
+    service_endpoint = not request.path.startswith("/api/ui/")
+    if not _revision_authorized(service_endpoint):
+        return _revision_error(
+            (
+                "Use a valid service bearer token."
+                if service_endpoint else "Open the application before editing."
+            ),
+            "unauthorized", 401,
+        )
+    job = _get_job(job_id)
+    if not job:
+        return _revision_error("Unknown job.", "unknown_job", 404)
+    if not _key_ok("OPENAI_API_KEY"):
+        return _revision_error(
+            "OPENAI_API_KEY is missing from .env.", "missing_api_key", 400
+        )
+
+    mode = request.form.get("mode", "").strip()
+    if mode not in {"replace_equipment", "edit_selected"}:
+        return _revision_error(
+            "mode must be replace_equipment or edit_selected.",
+            "invalid_mode", 400,
+        )
+    try:
+        selected_ids = _parse_json_field("selected_item_ids", [])
+        manifest = _parse_json_field("reference_manifest", [])
+        replacements = _parse_json_field("text_replacements", [])
+    except ValueError as exc:
+        return _revision_error(str(exc), "invalid_json", 400)
+    if not isinstance(selected_ids, list) or not all(
+        isinstance(value, str) for value in selected_ids
+    ):
+        return _revision_error(
+            "selected_item_ids must be a JSON array of strings.",
+            "invalid_selection", 400,
+        )
+    valid_ids = {item["item_id"] for item in job["items"]}
+    if mode == "edit_selected" and (
+        not selected_ids or not set(selected_ids).issubset(valid_ids)
+    ):
+        return _revision_error(
+            "Select one or more valid image item IDs.",
+            "invalid_selection", 400,
+        )
+
+    equipment_upload = request.files.get("equipment_file")
+    if mode == "replace_equipment":
+        error = _validate_image_upload(
+            equipment_upload, "Replacement equipment image", required=True
+        )
+        if error:
+            return _revision_error(error, "invalid_equipment", 400)
+
+    reference_uploads = [
+        upload for upload in request.files.getlist("reference_files")
+        if (upload.filename or "").strip()
+    ]
+    if len(reference_uploads) > 8:
+        return _revision_error(
+            "A revision can include at most eight reference images.",
+            "too_many_references", 400,
+        )
+    for upload in reference_uploads:
+        error = _validate_image_upload(upload, "Reference image")
+        if error:
+            return _revision_error(error, "invalid_reference", 400)
+    if not isinstance(manifest, list) or len(manifest) != len(reference_uploads):
+        return _revision_error(
+            "reference_manifest must contain one entry per reference file.",
+            "invalid_manifest", 400,
+        )
+    for entry in manifest:
+        if (
+            not isinstance(entry, dict)
+            or entry.get("role") not in REFERENCE_ROLES
+            or not isinstance(entry.get("file_index"), int)
+            or not 0 <= entry["file_index"] < len(reference_uploads)
+        ):
+            return _revision_error(
+                "Every reference manifest entry needs a valid file_index and role.",
+                "invalid_manifest", 400,
+            )
+    if {entry["file_index"] for entry in manifest} != set(
+        range(len(reference_uploads))
+    ):
+        return _revision_error(
+            "reference_manifest must describe each reference file exactly once.",
+            "invalid_manifest", 400,
+        )
+    if not isinstance(replacements, list) or any(
+        not isinstance(entry, dict)
+        or not isinstance(entry.get("from"), str)
+        or not entry.get("from")
+        or not isinstance(entry.get("to"), str)
+        for entry in replacements
+    ):
+        return _revision_error(
+            "text_replacements must contain non-empty from/to strings.",
+            "invalid_text_replacements", 400,
+        )
+
+    instruction = request.form.get("instruction", "").strip()
+    if mode == "edit_selected" and not instruction and not replacements:
+        return _revision_error(
+            "Provide an instruction or an exact text replacement.",
+            "missing_instruction", 400,
+        )
+    quality = request.form.get("quality", job["_brief"]["quality"]).strip()
+    if service_endpoint:
+        quality = "low"
+    if quality not in QUALITIES:
+        return _revision_error(
+            "quality must be low, medium, or high.", "invalid_quality", 400
+        )
+    idempotency_key = request.headers.get("Idempotency-Key", "").strip()
+    if not idempotency_key:
+        return _revision_error(
+            "Idempotency-Key header is required.", "missing_idempotency_key", 400
+        )
+    if len(idempotency_key) > 200:
+        return _revision_error(
+            "Idempotency-Key is too long.", "invalid_idempotency_key", 400
+        )
+
+    revision, _created = _queue_revision(
+        job,
+        mode=mode,
+        selected_item_ids=selected_ids,
+        instruction=instruction,
+        quality=quality,
+        idempotency_key=idempotency_key,
+        equipment_upload=equipment_upload,
+        reference_uploads=reference_uploads,
+        reference_manifest=manifest,
+        text_replacements=replacements,
+    )
+    return jsonify({
+        "revision_id": revision["revision_id"],
+        "batch_id": job["id"],
+        "status": revision["status"],
+        "status_url": (
+            f"/api/revisions/{revision['revision_id']}"
+            if service_endpoint else
+            f"/api/ui/revisions/{revision['revision_id']}"
+        ),
+    }), 202
+
+
+@app.route("/api/revisions/<revision_id>")
+@app.route("/api/ui/revisions/<revision_id>")
+def api_revision(revision_id):
+    service_endpoint = not request.path.startswith("/api/ui/")
+    if not _revision_authorized(service_endpoint):
+        return _revision_error(
+            (
+                "Use a valid service bearer token."
+                if service_endpoint else "Open the application before editing."
+            ),
+            "unauthorized", 401,
+        )
+    revision = STORE.load_revision(revision_id)
+    if not revision:
+        return _revision_error("Unknown revision.", "unknown_revision", 404)
+    return jsonify({
+        "revision_id": revision["revision_id"],
+        "batch_id": revision["batch_id"],
+        "status": revision["status"],
+        "error": revision.get("error", ""),
+        "items": revision.get("items", []),
+    })
 
 
 @app.route("/api/jobs/<job_id>/refine/<int:idx>", methods=["POST"])
 def api_job_refine(job_id, idx):
-    job = JOBS.get(job_id)
+    """Backward-compatible text-only refine routed through revisions."""
+    job = _get_job(job_id)
     if not job:
         return jsonify({"error": "Unknown job."}), 404
     data = request.get_json(silent=True) or {}
     instruction = (data.get("instruction") or "").strip()
     if not instruction:
         return jsonify({"error": "Type what you want changed."}), 400
-    if idx not in job["_full_images"]:
-        return jsonify({"error": "That image isn't available to refine "
-                                 "anymore."}), 400
-    if not _key_ok("OPENAI_API_KEY"):
-        return jsonify({"error": "OPENAI_API_KEY is missing from .env."}), 400
-
-    src_item = job["items"][idx] if idx < len(job["items"]) else {}
-    base_label = (src_item.get("style_label") or "Image").split(" · refined")[0]
-    prompt = (
-        f"Here is a finished HVAC ad image. Apply this revision: {instruction}\n"
-        "Keep every other element of the image exactly the same — same "
-        "layout, same text and offer wording, same colours, same HVAC unit, "
-        "same logo. Square 1:1 aspect ratio, fully in English."
+    if not 0 <= idx < len(job["items"]):
+        return jsonify({"error": "That image is unavailable."}), 400
+    revision, _created = _queue_revision(
+        job,
+        mode="edit_selected",
+        selected_item_ids=[job["items"][idx]["item_id"]],
+        instruction=instruction,
+        quality=job["_brief"]["quality"],
+        idempotency_key=f"legacy-{uuid.uuid4().hex}",
     )
-    with job["_lock"]:
-        new_idx = len(job["items"])
-        item = {
-            "idx": new_idx,
-            "style_key": src_item.get("style_key", "refined"),
-            "style_label": f"{base_label} · refined",
-            "status": "queued",
-            "error": "",
-            "drive_link": "",
-            "has_thumb": False,
-            "local_image": False,
-            "refine_of": idx,
-        }
-        job["items"].append(item)
-        job["_prompts"][new_idx] = prompt
-        job["_refines"] += 1
-        job["status"] = "running"
-        job["phase"] = f"Refining image {idx + 1}"
-    threading.Thread(target=_run_refine, args=(job, item, idx),
-                     daemon=True).start()
-    return jsonify({"job_id": job["id"], "idx": new_idx})
+    return jsonify({
+        "job_id": job["id"],
+        "idx": idx,
+        "revision_id": revision["revision_id"],
+    }), 202
 
 
 # ── Generate API ───────────────────────────────────────────────────────────────
@@ -971,14 +1509,24 @@ def api_generate():
     job["folder_name"] = (folder_name or "Google Drive"
                           if folder_id else "Local downloads")
     job["warnings"].extend(_brief_warnings(brief))
+    _persist_job(job)
 
     threading.Thread(target=_run_job, args=(job, folder_id), daemon=True).start()
-    return jsonify({"job_id": job["id"]})
+    return jsonify({"job_id": job["id"], "batch_id": job["id"]})
+
+
+@app.route("/api/jobs")
+def api_jobs():
+    try:
+        limit = int(request.args.get("limit", "20"))
+    except ValueError:
+        limit = 20
+    return jsonify({"jobs": STORE.list_batches(limit)})
 
 
 @app.route("/api/jobs/<job_id>")
 def api_job(job_id):
-    job = JOBS.get(job_id)
+    job = _get_job(job_id)
     if not job:
         return jsonify({"error": "Unknown job."}), 404
     with job["_lock"]:
@@ -987,37 +1535,55 @@ def api_job(job_id):
 
 @app.route("/api/jobs/<job_id>/thumb/<int:idx>")
 def api_job_thumb(job_id, idx):
-    job = JOBS.get(job_id)
-    if not job or idx not in job["_thumbs"]:
+    job = _get_job(job_id)
+    if not job or not 0 <= idx < len(job["items"]):
         return jsonify({"error": "No thumbnail."}), 404
+    if idx not in job["_thumbs"]:
+        current = Path(job["items"][idx].get("current_file", ""))
+        if not current.is_file():
+            return jsonify({"error": "No thumbnail."}), 404
+        try:
+            job["_thumbs"][idx] = make_thumbnail(current.read_bytes())
+        except Exception:
+            return jsonify({"error": "No thumbnail."}), 404
     # Long cache: thumbnail bytes are immutable per (job, idx).
     return send_file(io.BytesIO(job["_thumbs"][idx]), mimetype="image/jpeg",
-                     max_age=86400)
+                     max_age=0)
 
 
 @app.route("/api/jobs/<job_id>/image/<int:idx>")
 def api_job_image(job_id, idx):
     """Download any generated image at full resolution."""
-    job = JOBS.get(job_id)
-    if not job or idx not in job["_full_images"]:
+    job = _get_job(job_id)
+    if not job or not 0 <= idx < len(job["items"]):
         return jsonify({"error": "No image."}), 404
     item = job["items"][idx]
+    image_bytes = job["_full_images"].get(idx)
+    if image_bytes is None:
+        current = Path(item.get("current_file", ""))
+        if not current.is_file():
+            return jsonify({"error": "No image."}), 404
+        image_bytes = current.read_bytes()
     return send_file(
-        io.BytesIO(job["_full_images"][idx]), mimetype="image/png",
+        io.BytesIO(image_bytes), mimetype="image/png",
         as_attachment=True,
-        download_name=f"{idx + 1:02d}_{item['style_key']}.png",
+        download_name=(
+            f"{item.get('position', idx + 1):02d}_{item['style_key']}"
+            f"_v{item.get('version', 1)}.png"
+        ),
     )
 
 
 @app.route("/api/jobs/<job_id>/cancel", methods=["POST"])
 def api_job_cancel(job_id):
-    job = JOBS.get(job_id)
+    job = _get_job(job_id)
     if not job:
         return jsonify({"error": "Unknown job."}), 404
     job["_cancel"].set()
     with job["_lock"]:
         if job["status"] == "running":
             job["phase"] = "Cancelling — finishing in-flight images"
+        _persist_job(job)
     return jsonify({"ok": True})
 
 

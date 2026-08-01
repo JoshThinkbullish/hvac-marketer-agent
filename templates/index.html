@@ -251,6 +251,46 @@
 
           <div class="tile-grid" id="tileGrid"></div>
 
+          <div class="revision-editor" id="revisionEditor" hidden>
+            <div class="revision-editor__head">
+              <div>
+                <div class="assets__title">Revise this batch</div>
+                <div class="field-hint" id="selectionSummary">Select images using the checkboxes above.</div>
+              </div>
+            </div>
+
+            <div class="field">
+              <label for="revisionInstruction">Edit instruction</label>
+              <textarea id="revisionInstruction" rows="3" placeholder="Describe only what should change in the selected images"></textarea>
+            </div>
+
+            <div class="field">
+              <label for="revisionReferences">Additional visual references <span class="label-note">optional</span></label>
+              <input type="file" id="revisionReferences" accept=".png,.jpg,.jpeg,.webp,image/png,image/jpeg,image/webp" multiple />
+              <div id="referenceRoles" class="reference-roles"></div>
+              <div class="field-hint">Choose the role of each upload. Supporting products never replace the HVAC equipment.</div>
+            </div>
+
+            <div class="field">
+              <label>Exact text replacement <span class="label-note">optional</span></label>
+              <div class="replacement-row">
+                <input type="text" id="replaceFrom" placeholder="Exact text currently shown" />
+                <span>→</span>
+                <input type="text" id="replaceTo" placeholder="Replacement text" />
+              </div>
+            </div>
+
+            <button type="button" id="editSelectedBtn" class="btn btn--primary">Edit selected images</button>
+
+            <div class="equipment-replace">
+              <div class="field">
+                <label for="replacementEquipment">Replacement HVAC equipment image</label>
+                <input type="file" id="replacementEquipment" accept=".png,.jpg,.jpeg,.webp,image/png,image/jpeg,image/webp" />
+              </div>
+              <button type="button" id="replaceEquipmentBtn" class="btn btn--danger">Replace HVAC equipment across entire batch</button>
+            </div>
+          </div>
+
           <div class="assets" id="assetsBox" hidden>
             <div class="assets__title">Docs &amp; assets</div>
             <div class="assets__links" id="assetLinks"></div>
@@ -261,7 +301,7 @@
         </div>
 
         <div class="panel prev-runs" id="prevRuns" hidden>
-          <div class="assets__title">Previous runs this session</div>
+          <div class="assets__title">Persistent previous runs</div>
           <div class="assets__links" id="prevRunLinks"></div>
         </div>
 
@@ -598,6 +638,7 @@
 
     let lastJob = null;
     let openRefine = { idx: null, value: '', focus: false };
+    const selectedItems = new Set();
 
     function renderJob(job) {
       lastJob = job;
@@ -618,32 +659,38 @@
       $('progressBar').classList.toggle('progress__bar--done', job.status === 'done');
       $('progressBar').classList.toggle('progress__bar--err', job.status === 'error');
 
+      const availableIds = new Set(job.items.map(item => item.item_id));
+      [...selectedItems].forEach(id => { if (!availableIds.has(id)) selectedItems.delete(id); });
       $('tileGrid').innerHTML = job.items.map(item => {
         const meta = STATUS_META[item.status] || STATUS_META.queued;
         const canRefine = item.status === 'done';
         const img = item.has_thumb
-          ? `<img src="/api/jobs/${esc(job.id)}/thumb/${item.idx}" alt="" loading="lazy" />`
+          ? `<img src="/api/jobs/${esc(job.id)}/thumb/${item.idx}?v=${item.version || 1}" alt="" loading="lazy" />`
           : `<div class="tile__ph ${meta.cls === 'is-working' ? 'tile__ph--pulse' : ''}"></div>`;
         const driveLink = item.drive_link
           ? `<a href="${esc(item.drive_link)}" target="_blank" class="tile__open">Drive ↗</a>` : '';
         const downloadLink = item.local_image
           ? `<a href="/api/jobs/${esc(job.id)}/image/${item.idx}" class="tile__download" title="Download full-resolution image" aria-label="Download image ${item.idx + 1}">↓</a>` : '';
         const refineBtn = canRefine
-          ? `<button type="button" class="tile__refine" data-refine="${item.idx}" title="Type a tweak, hit Enter — generates a refined copy">✎ Refine</button>` : '';
+          ? `<label class="tile__select" title="Select image ${item.position || item.idx + 1}"><input type="checkbox" data-item-id="${esc(item.item_id)}" ${selectedItems.has(item.item_id) ? 'checked' : ''} /></label>` : '';
         const refineBar = openRefine.idx === item.idx ? `
           <div class="tile__refinebar">
             <input type="text" placeholder='e.g. "add a smart thermostat next to the unit" — Enter to run' value="${esc(openRefine.value)}" />
           </div>` : '';
         const err = item.status === 'failed' ? `<div class="tile__err" title="${esc(item.error)}">${esc(item.error || 'Failed')}</div>` : '';
-        return `<div class="tile ${meta.cls}">
+        const changed = item.changed ? `<span class="tile__changed">Changed in latest revision</span>` : '';
+        return `<div class="tile ${meta.cls} ${item.changed ? 'was-changed' : ''}">
             <div class="tile__img"${canRefine ? ` data-refine="${item.idx}"` : ''}>${img}</div>
             <div class="tile__bar">
-              <span class="tile__name">${String(item.idx + 1).padStart(2, '0')} ${esc(item.style_label)}</span>
-              <span class="tile__status">${meta.label}</span>
+              <span class="tile__name">${String(item.position || item.idx + 1).padStart(2, '0')} ${esc(item.style_label)}</span>
+              <span class="tile__status">${meta.label} <span class="tile__version">v${item.version || 1}</span></span>
             </div>
-            ${refineBtn}${driveLink}${downloadLink}${refineBar}${err}
+            ${refineBtn}${driveLink}${downloadLink}${changed}${refineBar}${err}
           </div>`;
       }).join('');
+
+      $('revisionEditor').hidden = !job.items.some(item => item.status === 'done');
+      updateSelectionSummary();
 
       // Re-wire the open refine bar after the innerHTML rebuild.
       const refineInput = $('tileGrid').querySelector('.tile__refinebar input');
@@ -697,19 +744,32 @@
       } else footer.hidden = true;
     }
 
-    // ── Previous-runs list (survives starting a new run, not reloads) ────
-    const prevRuns = [];
+    // ── Previous runs come from durable server storage ───────────────────
+    let prevRuns = [];
     function rememberRun(job) {
-      if (!job.run_folder_link || prevRuns.some(r => r.id === job.id)) return;
-      prevRuns.unshift({ id: job.id, name: job.run_folder_name, link: job.run_folder_link });
-      if (prevRuns.length > 3) prevRuns.pop();
+      loadPreviousRuns();
     }
     function showPrevRuns() {
-      if (!prevRuns.length) return;
-      $('prevRuns').hidden = false;
+      $('prevRuns').hidden = prevRuns.length === 0;
       $('prevRunLinks').innerHTML = prevRuns.map(r =>
-        `<a href="${esc(r.link)}" target="_blank" class="asset-link">📁 ${esc(r.name)} ↗</a>`).join('');
+        `<button type="button" class="asset-link persistent-run" data-job-id="${esc(r.id)}">
+          ${esc(r.client_name || 'Untitled client')} · ${r.item_count} images · ${r.revision_count} revisions
+        </button>`).join('');
     }
+    async function loadPreviousRuns() {
+      try {
+        const res = await fetch('/api/jobs?limit=12');
+        const json = await res.json();
+        prevRuns = json.jobs || [];
+        showPrevRuns();
+      } catch {}
+    }
+    $('prevRunLinks').addEventListener('click', e => {
+      const button = e.target.closest('[data-job-id]');
+      if (!button) return;
+      selectedItems.clear();
+      poll(button.dataset.jobId);
+    });
 
     $('cancelBtn').addEventListener('click', async () => {
       const id = $('cancelBtn').dataset.jobId;
@@ -730,6 +790,101 @@
         : { idx, value: '', focus: true };
       renderJob(lastJob);
     });
+    $('tileGrid').addEventListener('change', e => {
+      const checkbox = e.target.closest('[data-item-id]');
+      if (!checkbox) return;
+      if (checkbox.checked) selectedItems.add(checkbox.dataset.itemId);
+      else selectedItems.delete(checkbox.dataset.itemId);
+      updateSelectionSummary();
+    });
+
+    function updateSelectionSummary() {
+      const count = selectedItems.size;
+      $('selectionSummary').textContent = count
+        ? `${count} image${count === 1 ? '' : 's'} selected`
+        : 'Select images using the checkboxes above.';
+      $('editSelectedBtn').disabled = count === 0 || (lastJob && lastJob.status === 'running');
+      $('replaceEquipmentBtn').disabled = !!(lastJob && lastJob.status === 'running');
+    }
+
+    $('revisionReferences').addEventListener('change', () => {
+      const files = [...$('revisionReferences').files];
+      $('referenceRoles').innerHTML = files.map((file, index) => `
+        <label class="reference-role">
+          <span>${esc(file.name)}</span>
+          <select data-reference-role="${index}">
+            <option value="supporting_product">Supporting product</option>
+            <option value="general_reference">General reference</option>
+            <option value="logo">Logo</option>
+            <option value="primary_equipment">Primary equipment</option>
+          </select>
+        </label>`).join('');
+    });
+
+    async function submitBatchRevision(mode) {
+      if (!lastJob) return;
+      hideError();
+      const isEquipment = mode === 'replace_equipment';
+      const equipment = $('replacementEquipment').files[0];
+      if (isEquipment && !equipment) {
+        showError('Choose a replacement HVAC equipment image.');
+        return;
+      }
+      const instruction = $('revisionInstruction').value.trim();
+      const from = $('replaceFrom').value;
+      const to = $('replaceTo').value;
+      if (!isEquipment && !instruction && !from) {
+        showError('Enter an edit instruction or exact text replacement.');
+        return;
+      }
+      if (to && !from) {
+        showError('Enter the exact current text to replace.');
+        return;
+      }
+
+      const body = new FormData();
+      body.set('mode', mode);
+      body.set('selected_item_ids', JSON.stringify([...selectedItems]));
+      body.set('instruction', instruction);
+      body.set('quality', form.querySelector('input[name="quality"]:checked').value);
+      body.set('text_replacements', JSON.stringify(from ? [{ from, to }] : []));
+      if (equipment) body.set('equipment_file', equipment);
+
+      const references = [...$('revisionReferences').files];
+      const manifest = references.map((file, index) => {
+        body.append('reference_files', file);
+        const role = document.querySelector(`[data-reference-role="${index}"]`);
+        return { file_index: index, role: role ? role.value : 'general_reference', label: file.name };
+      });
+      body.set('reference_manifest', JSON.stringify(manifest));
+
+      const button = isEquipment ? $('replaceEquipmentBtn') : $('editSelectedBtn');
+      button.disabled = true;
+      const originalLabel = button.textContent;
+      button.textContent = 'Queuing revision…';
+      try {
+        const requestId = (crypto.randomUUID ? crypto.randomUUID() : `${Date.now()}-${Math.random()}`);
+        const res = await fetch(`/api/ui/jobs/${lastJob.id}/revisions`, {
+          method: 'POST',
+          headers: { 'Idempotency-Key': requestId },
+          body,
+        });
+        const json = await res.json();
+        if (!res.ok || json.error) throw new Error(json.error || 'Revision failed');
+        selectedItems.clear();
+        localStorage.setItem('activeJob', lastJob.id);
+        if (pollTimer) clearTimeout(pollTimer);
+        poll(lastJob.id);
+      } catch (err) {
+        showError(err.message);
+      } finally {
+        button.textContent = originalLabel;
+        updateSelectionSummary();
+      }
+    }
+
+    $('editSelectedBtn').addEventListener('click', () => submitBatchRevision('edit_selected'));
+    $('replaceEquipmentBtn').addEventListener('click', () => submitBatchRevision('replace_equipment'));
 
     async function submitRefine(jobId, idx, instruction) {
       openRefine = { idx: null, value: '', focus: false };
@@ -763,7 +918,7 @@
         const res = await fetch(`/api/jobs/${jobId}`);
         if (res.status === 404) {
           localStorage.removeItem('activeJob');
-          showError('This run expired from server memory. Completed local images are no longer available to download.');
+          showError('This persistent run could not be found.');
           resetSubmit();
           return;
         }
@@ -824,6 +979,7 @@
         const res = await fetch('/api/generate', { method: 'POST', body: new FormData(form) });
         const json = await res.json();
         if (!res.ok || json.error) throw new Error(json.error || 'Failed to start run');
+        selectedItems.clear();
         localStorage.setItem('activeJob', json.job_id);
         showPrevRuns();
         $('runPanel').hidden = false;
@@ -843,6 +999,7 @@
     restoreBrief();
     syncLogoMode();
     refreshSummary();
+    loadPreviousRuns();
     const activeJob = localStorage.getItem('activeJob');
     if (activeJob) {
       submitBtn.disabled = true;

@@ -49,9 +49,34 @@ GOOGLE_CLIENT_ID=...      # Drive OAuth
 GOOGLE_CLIENT_SECRET=...
 FLASK_SECRET_KEY=<random>
 IMAGE_MODEL=gpt-image-2   # optional override
+HVAC_SERVICE_API_KEY=<random>  # bearer token for Hermes/service revisions
+HVAC_DATA_DIR=./data            # optional persistent-volume location
+HVAC_RETENTION_DAYS=7           # minimum is seven days
 ```
 
-Run — double-click **start.bat** (or `.venv\Scripts\python app.py`). The browser opens to http://127.0.0.1:5000 automatically; click **Connect Google Drive** the first time, upload a PNG/JPG/WebP equipment image (and optionally a logo), and generate. Each upload can be up to 15 MB. Use a descriptive equipment filename such as `Lennox System.png`, because its filename identifies the equipment brand in the prompt. The text brief, style selection, and Drive folder persist across page reloads; browsers intentionally do not persist file selections, so choose the two files again after a reload. A page refresh mid-run still reattaches to live progress because job-owned copies are retained until generation completes.
+Run — double-click **start.bat** (or `.venv\Scripts\python app.py`). The browser opens to http://127.0.0.1:5000 automatically; click **Connect Google Drive** the first time, upload a PNG/JPG/WebP equipment image (and optionally a logo), and generate. Each upload can be up to 15 MB. Use a descriptive equipment filename such as `Lennox System.png`, because its filename identifies the equipment brand in the original generation prompt.
+
+Batch metadata, original uploads, generated images, hashes, and revision history are stored durably in `HVAC_DATA_DIR`. Point that variable at a persistent volume in production. Previous batches can be reopened from the UI after a page reload or application restart. Browser file selections themselves are intentionally not retained.
+
+## Batch revisions
+
+Completed tiles have stable item IDs, positions, hashes, and version numbers. Select one or more tiles to edit them together, optionally adding supporting visual references or exact text replacements. Unselected items keep the same file and SHA-256 hash. Equipment replacement has its own control and versions every item in the batch.
+
+External services use:
+
+```text
+POST /api/jobs/{job_id}/revisions
+Authorization: Bearer <HVAC_SERVICE_API_KEY>
+Idempotency-Key: <unique-request-id>
+Content-Type: multipart/form-data
+```
+
+The multipart fields are `mode`, `selected_item_ids`, `instruction`, optional
+`equipment_file`, repeated `reference_files`, `reference_manifest`,
+`text_replacements`, and `quality`. Service-authenticated requests always use
+low image quality. Poll the returned `/api/revisions/{revision_id}` URL; its
+terminal response contains the complete ordered batch, including unchanged
+items. The old `/api/jobs/{job_id}/refine/{index}` route remains available.
 
 ## Logo placement
 
