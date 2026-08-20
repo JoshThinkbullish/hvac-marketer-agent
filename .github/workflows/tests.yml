@@ -24,4 +24,5 @@ jobs:
           agent/drive_uploader.py
           agent/batch_store.py
           tests/test_drive.py
+          tests/test_downloads.py
           --ignore BLE001

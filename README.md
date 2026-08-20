@@ -7,10 +7,10 @@ One brief in → bulk ad creatives, Meta ad copy, video scripts, and voiceovers 
 1. Fill in the client brief: name, callout location, offer (**Headline / Sub-headline / Also include / Don't include**), then upload the HVAC equipment image and optional client logo.
 2. Pick **ad styles** (11 named templates), **image count**, **quality**, and a **scene setting** (modern suburban / luxury estate / beach house / country house / mountain home, or auto-vary). The callout grounds the scene's architecture, landscaping, climate and light in the real location without rendering the location name as artwork text. The summary panel shows a live estimated image cost per run.
 3. Pick an output mode:
-   - **Images only** — ad creatives with a full-resolution download button on every image tile; Google Drive is optional
+   - **Images only** — ad creatives with a full-resolution download button on every image tile and a ZIP download for multi-image runs; Google Drive is optional
    - **Images + Ad Copy** — adds Meta primary text + landing page prompt
    - **Full pipeline** — adds 2 brainrot scripts, 1 story script, ElevenLabs voiceovers, and story B-roll prompts
-4. Hit **Generate** and download completed images directly from their tiles. If Google Drive is connected and a folder is selected, the app also saves the run in a timestamped folder (`Images/`, `Videos/`). Drive remains required for the ad-copy and full-pipeline document outputs.
+4. Hit **Generate** and download completed images directly from their tiles. Runs with at least two completed images also show **Download all images**, which packages the latest revision of each image into one ZIP. If Google Drive is connected and a folder is selected, the app also saves the run in a timestamped folder (`Images/`, `Videos/`). Drive remains required for the ad-copy and full-pipeline document outputs.
 
 Use **Preview prompts** to inspect the exact prompts before spending image credits.
 
@@ -69,7 +69,7 @@ Batch metadata, original uploads, generated images, copy files, hashes, revision
 3. Configure the OAuth consent screen and add the Drive scope requested by the app.
 4. Start the app, click **Connect Google Drive**, approve access, and choose a writable folder from the searchable selector. **My Drive** and writable shared-drive folders are supported; a folder URL can also be pasted.
 
-Connections are isolated per signed browser session. Refresh tokens are encrypted at rest in SQLite, refreshed automatically, and revoked on disconnect. Before a paid generation starts, the app verifies that the selected folder still exists and accepts uploads. Each run creates a timestamped client folder with `Images/` and, for the full pipeline, `Videos/`. Stable private export keys make folder and file creation idempotent across rate limits, server errors, and ambiguous network timeouts.
+Connections are isolated per signed browser session, so different users or browser profiles can connect different Google accounts at the same time. One browser session has one active Drive account; disconnect and reconnect to switch it. Refresh tokens are encrypted at rest in SQLite, refreshed automatically, and revoked on disconnect. Before a paid generation starts, the app verifies that the selected folder still exists and accepts uploads. Each run creates a timestamped client folder with `Images/` and, for the full pipeline, `Videos/`. Stable private export keys make folder and file creation idempotent across rate limits, server errors, and ambiguous network timeouts.
 
 Generated images and copy are always saved to local durable storage before Drive upload. If Drive is temporarily unavailable, the run remains successful, every completed image and copy asset stays downloadable, and the UI reports which exports need attention.
 

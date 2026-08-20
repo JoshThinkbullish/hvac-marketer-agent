@@ -13,6 +13,7 @@ import threading
 import time
 import traceback
 import uuid
+import zipfile
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from pathlib import Path
@@ -684,13 +685,16 @@ def _public_job(job: dict) -> dict:
     ]
     public["items"] = []
     for item in job["items"]:
+        current_file = Path(item.get("current_file", ""))
+        is_downloadable = current_file.is_file()
         exposed = {
             key: value for key, value in item.items()
             if key != "current_file"
         }
+        exposed["local_image"] = is_downloadable
         exposed["image_url"] = (
             f"/api/jobs/{job['id']}/image/{item['idx']}"
-            if item.get("current_file") else ""
+            if is_downloadable else ""
         )
         public["items"].append(exposed)
     return public
@@ -1814,6 +1818,66 @@ def api_job_image(job_id, idx):
             f"{item.get('position', idx + 1):02d}_{item['style_key']}"
             f"_v{item.get('version', 1)}.png"
         ),
+    )
+
+
+@app.route("/api/jobs/<job_id>/images.zip")
+def api_job_images_zip(job_id):
+    """Download the latest available version of every image in one ZIP."""
+    job = _get_job(job_id)
+    if not job:
+        return jsonify({"error": "Unknown job."}), 404
+
+    with job["_lock"]:
+        available = []
+        for item in job["items"]:
+            source = Path(item.get("current_file", ""))
+            if not source.is_file():
+                continue
+            available.append({
+                "source": source,
+                "position": int(item.get("position", item["idx"] + 1)),
+                "style_key": item["style_key"],
+                "version": int(item.get("version", 1)),
+                "sha256": item.get("sha256", ""),
+            })
+
+    if len(available) < 2:
+        return jsonify({
+            "error": "At least two completed images are required for Download all."
+        }), 400
+
+    manifest = "|".join(
+        f"{entry['position']}:{entry['version']}:{entry['sha256']}"
+        for entry in available
+    )
+    digest = hashlib.sha256(manifest.encode("utf-8")).hexdigest()[:16]
+    download_dir = STORE.batch_dir(job_id) / "downloads"
+    download_dir.mkdir(parents=True, exist_ok=True)
+    archive_path = download_dir / f"images-{digest}.zip"
+
+    if not archive_path.is_file():
+        temporary_path = download_dir / f".{archive_path.name}.{uuid.uuid4().hex}.tmp"
+        try:
+            with zipfile.ZipFile(temporary_path, "w", zipfile.ZIP_STORED) as archive:
+                for entry in available:
+                    archive.write(
+                        entry["source"],
+                        arcname=(
+                            f"{entry['position']:02d}_{entry['style_key']}"
+                            f"_v{entry['version']}.png"
+                        ),
+                    )
+            os.replace(temporary_path, archive_path)
+        finally:
+            temporary_path.unlink(missing_ok=True)
+
+    return send_file(
+        archive_path,
+        mimetype="application/zip",
+        as_attachment=True,
+        download_name=f"{_slugify(job['client_name'])}_images.zip",
+        conditional=True,
     )
 
 
