@@ -200,7 +200,7 @@ def test_complete_local_job_never_calls_drive(monkeypatch):
     monkeypatch.setattr(
         app_module, "generate_image", lambda *_args, **_kwargs: image_bytes())
     monkeypatch.setattr(
-        app_module,
+        app_module.DRIVE,
         "create_subfolder",
         lambda *_args, **_kwargs: (_ for _ in ()).throw(
             AssertionError("Drive should not be used for a local-only job")),

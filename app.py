@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import io
 import hashlib
 import hmac
@@ -21,6 +23,7 @@ from flask import (
     Flask, jsonify, redirect, render_template, request, send_file, session,
     url_for,
 )
+from werkzeug.middleware.proxy_fix import ProxyFix
 
 BASE_DIR = Path(__file__).parent
 load_dotenv(BASE_DIR / ".env", override=True)
@@ -45,13 +48,10 @@ from agent.copy_generator import (
 )
 from agent.drive_uploader import (
     SCOPES as DRIVE_SCOPES,
-    TOKEN_PATH,
-    create_subfolder,
-    get_folders,
-    is_available as drive_is_available,
-    upload_bytes,
-    upload_doc,
-    upload_to_folder,
+    DriveError,
+    DriveFolderError,
+    DriveNotConnected,
+    DriveUploader,
 )
 from agent.image_generator import (
     composite_logo,
@@ -63,9 +63,26 @@ from agent.voice_generator import DEFAULT_VOICE_ID, generate_voiceover
 
 GOOGLE_CLIENT_ID     = os.environ.get("GOOGLE_CLIENT_ID", "")
 GOOGLE_CLIENT_SECRET = os.environ.get("GOOGLE_CLIENT_SECRET", "")
+GOOGLE_REDIRECT_URI  = os.environ.get("GOOGLE_REDIRECT_URI", "").strip()
 
 app = Flask(__name__)
 app.secret_key = os.environ.get("FLASK_SECRET_KEY", "dev-secret-key-change-me")
+app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1)
+secure_cookie_setting = os.environ.get("SESSION_COOKIE_SECURE", "").lower()
+app.config.update(
+    SESSION_COOKIE_HTTPONLY=True,
+    SESSION_COOKIE_SAMESITE="Lax",
+    SESSION_COOKIE_SECURE=(
+        secure_cookie_setting in {"1", "true", "yes"}
+        if secure_cookie_setting
+        else bool(os.environ.get("RENDER") or GOOGLE_REDIRECT_URI.startswith("https://"))
+    ),
+)
+if app.secret_key == "dev-secret-key-change-me":
+    log.warning(
+        "FLASK_SECRET_KEY is using the development default. Set a stable, "
+        "random value before connecting Google Drive in production."
+    )
 
 # Browser uploads supported by Pillow and the image API.
 SUPPORTED_EXTS = {".png", ".jpg", ".jpeg", ".webp"}
@@ -86,6 +103,7 @@ RETENTION_DAYS = max(7, int(os.environ.get("HVAC_RETENTION_DAYS", "7")))
 SERVICE_API_KEY = os.environ.get("HVAC_SERVICE_API_KEY", "").strip()
 STORE = BatchStore(default_data_root(BASE_DIR))
 STORE.prune(RETENTION_DAYS)
+DRIVE = DriveUploader(STORE, app.secret_key)
 
 
 @app.errorhandler(413)
@@ -110,6 +128,23 @@ def _lines(raw: str) -> list[str]:
     return [l.strip() for l in (raw or "").splitlines() if l.strip()]
 
 
+def _drive_connection_id() -> str:
+    return str(session.get("drive_connection_id", ""))
+
+
+def _drive_status() -> dict:
+    return DRIVE.connection_status(_drive_connection_id())
+
+
+def drive_is_available() -> bool:
+    """Compatibility helper used by request preflight and existing callers."""
+    return bool(_drive_status()["connected"])
+
+
+def _oauth_redirect_uri() -> str:
+    return GOOGLE_REDIRECT_URI or url_for("auth_callback", _external=True)
+
+
 # ── Main form ──────────────────────────────────────────────────────────────────
 
 @app.route("/")
@@ -117,13 +152,15 @@ def index():
     # A signed Flask session distinguishes the browser UI from external
     # service callers. External callers must use the service bearer token.
     session["ui_access"] = True
+    drive_status = _drive_status()
     return render_template(
         "index.html",
         styles=list(STYLES.values()),
         settings=SETTINGS,
         default_styles=DEFAULT_STYLE_KEYS,
         max_images=MAX_IMAGES,
-        connected=drive_is_available(),
+        connected=drive_status["connected"],
+        drive_account=drive_status.get("account_email", ""),
         creds_present=bool(GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET),
         openai_ok=_key_ok("OPENAI_API_KEY"),
         anthropic_ok=_key_ok("ANTHROPIC_API_KEY"),
@@ -137,11 +174,15 @@ def index():
 
 @app.route("/api/drive/folders")
 def api_drive_folders():
-    if not drive_is_available():
+    connection_id = _drive_connection_id()
+    if not connection_id or not drive_is_available():
         return jsonify({"error": "Not connected to Google Drive"}), 401
     try:
-        return jsonify({"folders": get_folders()})
-    except Exception as e:
+        return jsonify({"folders": DRIVE.get_folders(connection_id)})
+    except DriveNotConnected as e:
+        session.pop("drive_connection_id", None)
+        return jsonify({"error": str(e)}), 401
+    except DriveError as e:
         return jsonify({"error": str(e)}), 500
 
 
@@ -155,17 +196,17 @@ def _make_flow(state=None):
             "client_secret": GOOGLE_CLIENT_SECRET,
             "auth_uri": "https://accounts.google.com/o/oauth2/auth",
             "token_uri": "https://oauth2.googleapis.com/token",
-            "redirect_uris": [url_for("auth_callback", _external=True)],
+            "redirect_uris": [_oauth_redirect_uri()],
         }},
         scopes=DRIVE_SCOPES,
         state=state,
-        redirect_uri=url_for("auth_callback", _external=True),
+        redirect_uri=_oauth_redirect_uri(),
     )
 
 
 @app.route("/auth/google")
 def auth_google():
-    if not GOOGLE_CLIENT_ID:
+    if not GOOGLE_CLIENT_ID or not GOOGLE_CLIENT_SECRET:
         return redirect(url_for("index", error="missing_credentials"))
     flow = _make_flow()
     auth_url, state = flow.authorization_url(
@@ -179,35 +220,47 @@ def auth_google():
 
 @app.route("/auth/callback")
 def auth_callback():
-    os.environ["OAUTHLIB_INSECURE_TRANSPORT"] = "1"
+    expected_state = session.pop("oauth_state", "")
+    supplied_state = request.args.get("state", "")
+    if (not expected_state or not supplied_state
+            or not hmac.compare_digest(expected_state, supplied_state)):
+        log.warning("Rejected Google OAuth callback with invalid state.")
+        return redirect(url_for("index", error="google_auth_failed"))
+    if request.host.split(":", 1)[0] in {"127.0.0.1", "localhost"}:
+        # OAuthlib requires this opt-in for the permitted loopback HTTP flow.
+        os.environ["OAUTHLIB_INSECURE_TRANSPORT"] = "1"
     # Google may return more scopes than requested (previously granted);
     # don't hard-fail the exchange over it.
     os.environ["OAUTHLIB_RELAX_TOKEN_SCOPE"] = "1"
-    flow = _make_flow(state=session.get("oauth_state"))
+    flow = _make_flow(state=expected_state)
     try:
         flow.fetch_token(authorization_response=request.url)
+        connection_id = uuid.uuid4().hex
+        account = DRIVE.save_connection(connection_id, flow.credentials)
     except Exception:
         log.warning("Google OAuth callback failed:\n%s", traceback.format_exc())
         return redirect(url_for("index", error="google_auth_failed"))
-    session.pop("oauth_state", None)
-    with open(TOKEN_PATH, "w") as f:
-        f.write(flow.credentials.to_json())
+    old_connection_id = session.get("drive_connection_id")
+    session["drive_connection_id"] = connection_id
+    if old_connection_id and old_connection_id != connection_id:
+        DRIVE.disconnect(str(old_connection_id), revoke=False)
+    session["drive_account"] = account.get("account_email", "")
     return redirect(url_for("index", connected="true"))
 
 
-@app.route("/auth/disconnect")
+@app.route("/auth/disconnect", methods=["POST"])
 def auth_disconnect():
-    if TOKEN_PATH.exists():
-        TOKEN_PATH.unlink()
+    connection_id = session.pop("drive_connection_id", None)
+    session.pop("drive_account", None)
+    DRIVE.disconnect(connection_id)
     return redirect(url_for("index"))
 
 
 @app.route("/auth/status")
 def auth_status():
-    return jsonify({
-        "connected": TOKEN_PATH.exists(),
-        "creds_present": bool(GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET),
-    })
+    status = _drive_status()
+    status["creds_present"] = bool(GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET)
+    return jsonify(status)
 
 
 # ── Brief parsing (shared by preview + generate) ──────────────────────────────
@@ -468,6 +521,7 @@ def _batch_payload(job: dict) -> dict:
     }
     public["_prompts"] = {str(k): v for k, v in job["_prompts"].items()}
     public["_images_folder_id"] = job.get("_images_folder_id", "")
+    public["_drive_connection_id"] = job.get("_drive_connection_id", "")
     public["_main_done"] = job.get("_main_done", False)
     return public
 
@@ -484,6 +538,7 @@ def _restore_job(payload: dict) -> dict:
         int(k): v for k, v in payload.pop("_prompts", {}).items()
     }
     images_folder_id = payload.pop("_images_folder_id", "")
+    drive_connection_id = payload.pop("_drive_connection_id", "")
     main_done = payload.pop("_main_done", True)
     job = dict(payload)
     job["_brief"] = brief
@@ -494,6 +549,12 @@ def _restore_job(payload: dict) -> dict:
     job["_main_done"] = main_done
     job["_refines"] = 0
     job["_images_folder_id"] = images_folder_id
+    job["_drive_connection_id"] = drive_connection_id
+    job.setdefault("copy", {}).setdefault("assets", [])
+    for item in job.get("items", []):
+        item.setdefault("drive_file_id", "")
+        item.setdefault("drive_status", "done" if item.get("drive_link") else "skipped")
+        item.setdefault("drive_error", "")
     job["_cancel"] = threading.Event()
     job["_lock"] = threading.RLock()
     if job["status"] == "running":
@@ -545,6 +606,9 @@ def _new_job(brief: dict, items: list[dict]) -> dict:
                 "status": "queued",
                 "error": "",
                 "drive_link": "",
+                "drive_file_id": "",
+                "drive_status": "pending",
+                "drive_error": "",
                 "has_thumb": False,
                 "local_image": False,
                 "current_file": "",
@@ -559,6 +623,7 @@ def _new_job(brief: dict, items: list[dict]) -> dict:
         "copy": {
             "status": "skipped" if brief["mode"] == "images" else "pending",
             "links": [],
+            "assets": [],
             "error": "",
             "angle": "",
         },
@@ -573,6 +638,7 @@ def _new_job(brief: dict, items: list[dict]) -> dict:
         "_main_done": False,
         "_refines": 0,
         "_images_folder_id": "",
+        "_drive_connection_id": "",
         "_cancel": threading.Event(),
         "_lock": threading.RLock(),
     }
@@ -605,6 +671,17 @@ def _new_job(brief: dict, items: list[dict]) -> dict:
 
 def _public_job(job: dict) -> dict:
     public = {k: v for k, v in job.items() if not k.startswith("_")}
+    public["copy"] = dict(job["copy"])
+    public["copy"]["links"] = [dict(link) for link in job["copy"].get("links", [])]
+    public["copy"]["assets"] = [
+        {
+            **asset,
+            "download_url": (
+                f"/api/jobs/{job['id']}/assets/{asset['asset_id']}"
+            ),
+        }
+        for asset in job["copy"].get("assets", [])
+    ]
     public["items"] = []
     for item in job["items"]:
         exposed = {
@@ -620,6 +697,54 @@ def _public_job(job: dict) -> dict:
 
 
 # ── Pipeline ───────────────────────────────────────────────────────────────────
+
+def _save_copy_asset(job: dict, asset_id: str, label: str, kind: str,
+                     filename: str, data: bytes, mime_type: str) -> dict:
+    """Durably save a generated copy/audio asset before any Drive upload."""
+    export_dir = STORE.batch_dir(job["id"]) / "exports"
+    export_dir.mkdir(parents=True, exist_ok=True)
+    path = export_dir / filename
+    path.write_bytes(data)
+    asset = {
+        "asset_id": asset_id,
+        "label": label,
+        "kind": kind,
+        "filename": filename,
+        "mime_type": mime_type,
+        "drive_link": "",
+        "drive_file_id": "",
+        "drive_status": "pending",
+        "drive_error": "",
+    }
+    with job["_lock"]:
+        existing = next(
+            (item for item in job["copy"].setdefault("assets", [])
+             if item["asset_id"] == asset_id),
+            None,
+        )
+        if existing:
+            existing.update(asset)
+            asset = existing
+        else:
+            job["copy"]["assets"].append(asset)
+        _persist_job(job)
+    return asset
+
+
+def _mark_asset_uploaded(job: dict, asset: dict, uploaded: dict) -> None:
+    with job["_lock"]:
+        asset.update({
+            "drive_link": uploaded.get("webViewLink", ""),
+            "drive_file_id": uploaded.get("id", ""),
+            "drive_status": "done",
+            "drive_error": "",
+        })
+        job["copy"]["links"].append({
+            "label": asset["label"],
+            "kind": asset["kind"],
+            "url": asset["drive_link"],
+        })
+        _persist_job(job)
 
 def _render_prompt_sheet(brief: dict, prompts: dict[int, str],
                          items: list[dict]) -> str:
@@ -655,7 +780,7 @@ def _render_prompt_sheet(brief: dict, prompts: dict[int, str],
     return "\n".join(lines).rstrip() + "\n"
 
 
-def _run_copy_pipeline(job: dict, run_folder_id: str,
+def _run_copy_pipeline(job: dict, connection_id: str, run_folder_id: str,
                        videos_folder_id: str | None):
     brief = job["_brief"]
     copy_state = job["copy"]
@@ -689,49 +814,91 @@ def _run_copy_pipeline(job: dict, run_folder_id: str,
             job["warnings"].append(f"Ad copy generation failed: {e}")
         return
 
-    links: list[dict] = []
-
     def _add_warning(msg: str):
         with job["_lock"]:
             job["warnings"].append(msg)
 
-    try:
-        md = render_meta_copy_md(brief["client_name"], copy["angle"],
-                                 copy["meta_primary_text"])
-        links.append({"label": "Ad Copy (Meta primary text)", "kind": "doc",
-                      "url": upload_doc(run_folder_id, md, "Ad Copy")})
-    except Exception as e:
-        _add_warning(f"Ad Copy doc upload failed: {e}")
-
-    try:
-        landing_md = render_landing_page_prompt(
-            client_name=brief["client_name"],
-            website=brief["website"],
-            meta_primary_text=copy["meta_primary_text"],
+    def _save_and_upload_doc(asset_id: str, label: str, filename: str,
+                             doc_name: str, markdown: str,
+                             folder_id: str, kind: str = "doc"):
+        asset = _save_copy_asset(
+            job, asset_id, label, kind, filename,
+            markdown.encode("utf-8"), "text/markdown",
         )
-        links.append({"label": "Landing Page Prompt", "kind": "doc",
-                      "url": upload_doc(run_folder_id, landing_md,
-                                        "Landing Page Prompt")})
-    except Exception as e:
-        _add_warning(f"Landing page prompt upload failed: {e}")
+        try:
+            with job["_lock"]:
+                asset["drive_status"] = "uploading"
+            uploaded = DRIVE.upload_doc(
+                connection_id, folder_id, markdown, doc_name,
+                export_key=f"{job['id']}:copy:{asset_id}",
+            )
+            _mark_asset_uploaded(job, asset, uploaded)
+        except Exception as e:
+            with job["_lock"]:
+                asset["drive_status"] = "failed"
+                asset["drive_error"] = str(e)
+                _persist_job(job)
+            _add_warning(
+                f"{label} Drive upload failed: {e} — a local download is available."
+            )
+
+    def _save_and_upload_audio(asset_id: str, label: str, filename: str,
+                               audio: bytes, folder_id: str):
+        asset = _save_copy_asset(
+            job, asset_id, label, "audio", filename, audio, "audio/mpeg"
+        )
+        try:
+            with job["_lock"]:
+                asset["drive_status"] = "uploading"
+            uploaded = DRIVE.upload_bytes(
+                connection_id, folder_id, audio, filename, "audio/mpeg",
+                export_key=f"{job['id']}:copy:{asset_id}",
+            )
+            _mark_asset_uploaded(job, asset, uploaded)
+        except Exception as e:
+            with job["_lock"]:
+                asset["drive_status"] = "failed"
+                asset["drive_error"] = str(e)
+                _persist_job(job)
+            _add_warning(
+                f"{label} Drive upload failed: {e} — a local download is available."
+            )
+
+    md = render_meta_copy_md(
+        brief["client_name"], copy["angle"], copy["meta_primary_text"]
+    )
+    _save_and_upload_doc(
+        "ad-copy", "Ad Copy (Meta primary text)", "ad-copy.md", "Ad Copy",
+        md, run_folder_id,
+    )
+
+    landing_md = render_landing_page_prompt(
+        client_name=brief["client_name"],
+        website=brief["website"],
+        meta_primary_text=copy["meta_primary_text"],
+    )
+    _save_and_upload_doc(
+        "landing-page-prompt", "Landing Page Prompt",
+        "landing-page-prompt.md", "Landing Page Prompt", landing_md,
+        run_folder_id,
+    )
 
     if brief["mode"] == "full" and videos_folder_id:
         def _push_script(kind_label: str, doc_name: str, body: str,
-                         audio_filename: str):
-            try:
-                md = render_script_md(brief["client_name"], kind_label,
-                                      doc_name, body, copy["angle"])
-                links.append({"label": doc_name, "kind": "script",
-                              "url": upload_doc(videos_folder_id, md, doc_name)})
-            except Exception as e:
-                _add_warning(f"{doc_name} doc upload failed: {e}")
+                         audio_filename: str, asset_slug: str):
+            script_md = render_script_md(
+                brief["client_name"], kind_label, doc_name, body, copy["angle"]
+            )
+            _save_and_upload_doc(
+                f"{asset_slug}-script", doc_name, f"{asset_slug}-script.md",
+                doc_name, script_md, videos_folder_id, kind="script",
+            )
             try:
                 audio = generate_voiceover(body, voice_id=DEFAULT_VOICE_ID)
-                links.append({
-                    "label": f"{doc_name} (voiceover)", "kind": "audio",
-                    "url": upload_bytes(videos_folder_id, audio,
-                                        audio_filename, mime_type="audio/mpeg"),
-                })
+                _save_and_upload_audio(
+                    f"{asset_slug}-voiceover", f"{doc_name} (voiceover)",
+                    audio_filename, audio, videos_folder_id,
+                )
             except Exception as e:
                 _add_warning(f"Voiceover for {doc_name} failed: {e}")
 
@@ -743,6 +910,7 @@ def _run_copy_pipeline(job: dict, run_folder_id: str,
                 doc_name=f"Brainrot {idx} - {title}",
                 body=script.get("body", ""),
                 audio_filename=f"voiceover_brainrot_{idx}_{slug}.mp3",
+                asset_slug=f"brainrot-{idx}",
             )
 
         story = copy["story_script"]
@@ -752,29 +920,44 @@ def _run_copy_pipeline(job: dict, run_folder_id: str,
             doc_name=f"Story Script - {story_title}",
             body=story.get("body", ""),
             audio_filename=f"voiceover_story_{_slugify(story_title, 'story')}.mp3",
+            asset_slug="story",
         )
 
         if copy["story_image_prompts"]:
-            try:
-                b_roll_md = render_story_b_roll_md(
-                    brief["client_name"], story_title,
-                    copy["story_image_prompts"],
-                )
-                links.append({
-                    "label": "Story B-Roll Image Prompts", "kind": "doc",
-                    "url": upload_doc(videos_folder_id, b_roll_md,
-                                      "Story B-Roll Image Prompts"),
-                })
-            except Exception as e:
-                _add_warning(f"Story B-roll prompts upload failed: {e}")
+            b_roll_md = render_story_b_roll_md(
+                brief["client_name"], story_title,
+                copy["story_image_prompts"],
+            )
+            _save_and_upload_doc(
+                "story-b-roll", "Story B-Roll Image Prompts",
+                "story-b-roll-prompts.md", "Story B-Roll Image Prompts",
+                b_roll_md, videos_folder_id,
+            )
 
     with job["_lock"]:
-        copy_state["links"] = links
         copy_state["angle"] = copy.get("angle", "")
         copy_state["status"] = "done"
+        _persist_job(job)
 
 
-def _run_one_image(job: dict, item: dict, images_folder_id: str = ""):
+def _run_copy_pipeline_guarded(job: dict, connection_id: str,
+                               run_folder_id: str,
+                               videos_folder_id: str | None):
+    try:
+        _run_copy_pipeline(
+            job, connection_id, run_folder_id, videos_folder_id
+        )
+    except Exception as error:
+        log.error("Copy pipeline failed:\n%s", traceback.format_exc())
+        with job["_lock"]:
+            job["copy"]["error"] = str(error)
+            job["copy"]["status"] = "failed"
+            job["warnings"].append(f"Ad copy pipeline failed: {error}")
+            _persist_job(job)
+
+
+def _run_one_image(job: dict, item: dict, images_folder_id: str = "",
+                   connection_id: str = ""):
     if SHUTTING_DOWN.is_set() or job["_cancel"].is_set():
         with job["_lock"]:
             item["status"] = "failed"
@@ -840,32 +1023,40 @@ def _run_one_image(job: dict, item: dict, images_folder_id: str = ""):
     if not images_folder_id:
         with job["_lock"]:
             item["status"] = "done"
+            item["drive_status"] = "skipped"
             _persist_job(job)
         return
 
     with job["_lock"]:
         item["status"] = "uploading"
+        item["drive_status"] = "uploading"
     filename = f"{item['idx'] + 1:02d}_{item['style_key']}.png"
     try:
-        link = upload_to_folder(images_folder_id, img_bytes, filename)
+        uploaded = DRIVE.upload_image(
+            connection_id, images_folder_id, img_bytes, filename,
+            export_key=f"{job['id']}:image:{item['item_id']}:v1",
+        )
         with job["_lock"]:
-            item["drive_link"] = link
+            item["drive_link"] = uploaded.get("webViewLink", "")
+            item["drive_file_id"] = uploaded.get("id", "")
+            item["drive_status"] = "done"
             item["status"] = "done"
             _persist_job(job)
     except Exception as e:
-        # The image is paid for and already kept in _full_images — surface
-        # a download link instead of discarding it.
+        # Generation succeeded and the durable local file is the source of
+        # truth. A Drive outage must not turn a paid-for image into a failure.
         with job["_lock"]:
-            item["status"] = "failed"
+            item["status"] = "done"
             item["local_image"] = True
-            item["error"] = f"Drive upload failed: {e}"
+            item["drive_status"] = "failed"
+            item["drive_error"] = str(e)
             job["warnings"].append(
                 f"Upload failed for image {item['idx'] + 1}: {e} — the "
                 f"image is still downloadable from its tile.")
             _persist_job(job)
 
 
-def _run_job(job: dict, folder_id: str = ""):
+def _run_job(job: dict, folder_id: str = "", connection_id: str = ""):
     brief = job["_brief"]
 
     def _set(**fields):
@@ -880,14 +1071,22 @@ def _run_job(job: dict, folder_id: str = ""):
             _set(phase="Creating Drive folders")
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
             run_folder_name = f"{_slugify(brief['client_name'])}_{timestamp}"
-            run_folder = create_subfolder(folder_id, run_folder_name)
+            run_folder = DRIVE.create_subfolder(
+                connection_id, folder_id, run_folder_name,
+                export_key=f"{job['id']}:folder:run",
+            )
             run_folder_id = run_folder["id"]
-            images_folder_id = create_subfolder(
-                run_folder_id, "Images")["id"]
+            images_folder_id = DRIVE.create_subfolder(
+                connection_id, run_folder_id, "Images",
+                export_key=f"{job['id']}:folder:images",
+            )["id"]
             job["_images_folder_id"] = images_folder_id
+            job["_drive_connection_id"] = connection_id
             if brief["mode"] == "full":
-                videos_folder_id = create_subfolder(
-                    run_folder_id, "Videos")["id"]
+                videos_folder_id = DRIVE.create_subfolder(
+                    connection_id, run_folder_id, "Videos",
+                    export_key=f"{job['id']}:folder:videos",
+                )["id"]
 
             _set(run_folder_link=run_folder.get("webViewLink", ""),
                  run_folder_name=run_folder_name)
@@ -895,8 +1094,11 @@ def _run_job(job: dict, folder_id: str = ""):
             try:
                 sheet = _render_prompt_sheet(
                     brief, job["_prompts"], job["items"])
-                link = upload_doc(run_folder_id, sheet, "Image Prompts")
-                _set(prompt_doc_link=link)
+                uploaded = DRIVE.upload_doc(
+                    connection_id, run_folder_id, sheet, "Image Prompts",
+                    export_key=f"{job['id']}:prompt-sheet",
+                )
+                _set(prompt_doc_link=uploaded.get("webViewLink", ""))
             except Exception as e:
                 with job["_lock"]:
                     job["warnings"].append(
@@ -908,8 +1110,8 @@ def _run_job(job: dict, folder_id: str = ""):
         copy_thread = None
         if brief["mode"] != "images":
             copy_thread = threading.Thread(
-                target=_run_copy_pipeline,
-                args=(job, run_folder_id, videos_folder_id),
+                target=_run_copy_pipeline_guarded,
+                args=(job, connection_id, run_folder_id, videos_folder_id),
                 daemon=True,
             )
             copy_thread.start()
@@ -917,7 +1119,9 @@ def _run_job(job: dict, folder_id: str = ""):
         _set(phase="Generating images")
         with ThreadPoolExecutor(max_workers=IMAGE_CONCURRENCY) as pool:
             futures = [
-                pool.submit(_run_one_image, job, item, images_folder_id)
+                pool.submit(
+                    _run_one_image, job, item, images_folder_id, connection_id
+                )
                 for item in job["items"]
             ]
             for f in futures:
@@ -1086,15 +1290,37 @@ def _run_revision_item(job: dict, revision: dict, item: dict) -> None:
     image_path.write_bytes(image_bytes)
 
     drive_link = item.get("drive_link", "")
+    drive_file_id = item.get("drive_file_id", "")
+    drive_status = "skipped"
+    drive_error = ""
     if job.get("_images_folder_id"):
         with job["_lock"]:
             item["status"] = "uploading"
+            item["drive_status"] = "uploading"
         filename = (
             f"{item['position']:02d}_{item['style_key']}_v{version}.png"
         )
-        drive_link = upload_to_folder(
-            job["_images_folder_id"], image_bytes, filename
-        )
+        try:
+            uploaded = DRIVE.upload_image(
+                job.get("_drive_connection_id", ""),
+                job["_images_folder_id"], image_bytes, filename,
+                export_key=(
+                    f"{job['id']}:image:{item['item_id']}:v{version}"
+                ),
+            )
+            drive_link = uploaded.get("webViewLink", "")
+            drive_file_id = uploaded.get("id", "")
+            drive_status = "done"
+        except Exception as error:
+            drive_link = ""
+            drive_file_id = ""
+            drive_status = "failed"
+            drive_error = str(error)
+            with job["_lock"]:
+                job["warnings"].append(
+                    f"Revision image {item['position']} Drive upload failed: "
+                    f"{error} — the revision is still available locally."
+                )
 
     with job["_lock"]:
         item.update({
@@ -1108,6 +1334,9 @@ def _run_revision_item(job: dict, revision: dict, item: dict) -> None:
             "parent_version": source_version,
             "changed": True,
             "drive_link": drive_link,
+            "drive_file_id": drive_file_id,
+            "drive_status": drive_status,
+            "drive_error": drive_error,
         })
         job["_full_images"][item["idx"]] = image_bytes
         try:
@@ -1490,7 +1719,8 @@ def api_generate():
                                  "restart, or use Images + Ad Copy."}), 400
 
     folder_id = request.form.get("folder_id", "").strip()
-    folder_name = request.form.get("folder_name", "").strip()
+    folder_name = ""
+    connection_id = _drive_connection_id()
     if brief["mode"] != "images" and not folder_id:
         return jsonify({
             "error": "Connect Google Drive and pick a folder for ad copy "
@@ -1499,6 +1729,17 @@ def api_generate():
     if folder_id and not drive_is_available():
         return jsonify({"error": "Google Drive not connected. Click "
                                  "'Connect Google Drive' first."}), 401
+    if folder_id:
+        try:
+            folder = DRIVE.validate_folder(connection_id, folder_id)
+            folder_name = folder["name"]
+        except DriveNotConnected as e:
+            session.pop("drive_connection_id", None)
+            return jsonify({"error": str(e)}), 401
+        except DriveFolderError as e:
+            return jsonify({"error": str(e)}), 400
+        except DriveError as e:
+            return jsonify({"error": str(e)}), 502
 
     err = _persist_brief_uploads(brief, request.files)
     if err:
@@ -1511,7 +1752,9 @@ def api_generate():
     job["warnings"].extend(_brief_warnings(brief))
     _persist_job(job)
 
-    threading.Thread(target=_run_job, args=(job, folder_id), daemon=True).start()
+    threading.Thread(
+        target=_run_job, args=(job, folder_id, connection_id), daemon=True
+    ).start()
     return jsonify({"job_id": job["id"], "batch_id": job["id"]})
 
 
@@ -1571,6 +1814,31 @@ def api_job_image(job_id, idx):
             f"{item.get('position', idx + 1):02d}_{item['style_key']}"
             f"_v{item.get('version', 1)}.png"
         ),
+    )
+
+
+@app.route("/api/jobs/<job_id>/assets/<asset_id>")
+def api_job_asset(job_id, asset_id):
+    """Download generated ad copy, scripts, or voiceovers from local storage."""
+    job = _get_job(job_id)
+    if not job:
+        return jsonify({"error": "Unknown job."}), 404
+    asset = next(
+        (entry for entry in job["copy"].get("assets", [])
+         if entry.get("asset_id") == asset_id),
+        None,
+    )
+    if not asset:
+        return jsonify({"error": "Unknown asset."}), 404
+    export_dir = (STORE.batch_dir(job_id) / "exports").resolve()
+    path = (export_dir / asset["filename"]).resolve()
+    if path.parent != export_dir or not path.is_file():
+        return jsonify({"error": "Asset is unavailable."}), 404
+    return send_file(
+        path,
+        mimetype=asset.get("mime_type", "application/octet-stream"),
+        as_attachment=True,
+        download_name=asset["filename"],
     )
 
 

@@ -7,4 +7,6 @@ __pycache__/
 .DS_Store
 .venv/
 *.log
+.coverage
+.pytest_cache/
 data/

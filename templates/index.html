@@ -28,8 +28,10 @@
           <span class="chip chip--warn"><span class="dot dot--yellow"></span> ELEVENLABS_API_KEY missing</span>
         {% endif %}
         {% if connected %}
-          <span class="chip chip--ok"><span class="dot dot--green"></span> Drive connected</span>
-          <a href="/auth/disconnect" class="chip-action">Disconnect</a>
+          <span class="chip chip--ok"><span class="dot dot--green"></span> Drive connected{% if drive_account %} · {{ drive_account }}{% endif %}</span>
+          <form action="/auth/disconnect" method="post" class="inline-form">
+            <button type="submit" class="chip-action chip-action--button">Disconnect</button>
+          </form>
         {% elif not creds_present %}
           <span class="chip chip--warn"><span class="dot dot--yellow"></span> Google creds missing in .env</span>
         {% else %}
@@ -339,6 +341,7 @@
       elevenlabs: {{ 'true' if elevenlabs_ok else 'false' }},
     };
     const DRIVE_CONNECTED = {{ 'true' if connected else 'false' }};
+    const DRIVE_ACCOUNT = {{ drive_account|tojson }};
     const RATES = { low: 0.006, medium: 0.053, high: 0.211 };  // gpt-image-2 $/image, approx
     const SETTINGS_MAP = {{ settings|tojson }};
 
@@ -404,7 +407,8 @@
                        'count'];
 
     function saveBrief() {
-      const data = { fields: {}, radios: {}, styles: [], folder: null };
+      const data = { fields: {}, radios: {}, styles: [], folder: null,
+                     driveAccount: DRIVE_ACCOUNT };
       FIELD_IDS.forEach(id => { const el = $(id); if (el) data.fields[id] = el.value; });
       ['logo_mode', 'quality', 'mode'].forEach(name => {
         const el = form.querySelector(`input[name="${name}"]:checked`);
@@ -436,7 +440,10 @@
           c.checked = data.styles.includes(c.value);
         });
       }
-      if (data.folder && data.folder.id) selectFolder(data.folder.id, data.folder.name);
+      if (DRIVE_CONNECTED && data.driveAccount === DRIVE_ACCOUNT
+          && data.folder && data.folder.id) {
+        selectFolder(data.folder.id, data.folder.name);
+      }
     }
 
     // ── Live summary ─────────────────────────────────────────────────────
@@ -715,9 +722,12 @@
 
       const assets = [];
       if (job.prompt_doc_link) assets.push({ label: '📝 Image Prompts sheet', url: job.prompt_doc_link });
-      (job.copy.links || []).forEach(l => {
-        const icon = l.kind === 'audio' ? '🎙' : l.kind === 'script' ? '🎬' : '📄';
-        assets.push({ label: `${icon} ${l.label}`, url: l.url });
+      (job.copy.assets || []).forEach(asset => {
+        const icon = asset.kind === 'audio' ? '🎙' : asset.kind === 'script' ? '🎬' : '📄';
+        assets.push({ label: `${icon} Download ${asset.label}`, url: asset.download_url });
+        if (asset.drive_link) {
+          assets.push({ label: `↗ Open ${asset.label} in Drive`, url: asset.drive_link });
+        }
       });
       if (job.copy.status === 'running' || job.copy.status === 'pending') {
         assets.push({ label: '⏳ Ad copy & scripts generating…', url: '' });
