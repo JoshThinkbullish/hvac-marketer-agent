@@ -34,6 +34,8 @@ The 8 designed styles are the team's proven manual prompts used **word-for-word*
 
 ## Setup
 
+Python 3.11 or newer is recommended.
+
 ```
 python -m venv .venv
 .venv\Scripts\pip install -r requirements.txt
@@ -47,7 +49,9 @@ ANTHROPIC_API_KEY=...     # ad copy + scripts (Claude)
 ELEVENLABS_API_KEY=...    # voiceovers (full pipeline only)
 GOOGLE_CLIENT_ID=...      # Drive OAuth
 GOOGLE_CLIENT_SECRET=...
-FLASK_SECRET_KEY=<random>
+GOOGLE_REDIRECT_URI=https://your-app.example.com/auth/callback  # production
+FLASK_SECRET_KEY=<stable-random-value>  # signs sessions + encrypts Drive tokens
+SESSION_COOKIE_SECURE=true              # production HTTPS deployments
 IMAGE_MODEL=gpt-image-2   # optional override
 HVAC_SERVICE_API_KEY=<random>  # bearer token for Hermes/service revisions
 HVAC_DATA_DIR=./data            # optional persistent-volume location
@@ -56,7 +60,27 @@ HVAC_RETENTION_DAYS=7           # minimum is seven days
 
 Run — double-click **start.bat** (or `.venv\Scripts\python app.py`). The browser opens to http://127.0.0.1:5000 automatically; click **Connect Google Drive** the first time, upload a PNG/JPG/WebP equipment image (and optionally a logo), and generate. Each upload can be up to 15 MB. Use a descriptive equipment filename such as `Lennox System.png`, because its filename identifies the equipment brand in the original generation prompt.
 
-Batch metadata, original uploads, generated images, hashes, and revision history are stored durably in `HVAC_DATA_DIR`. Point that variable at a persistent volume in production. Previous batches can be reopened from the UI after a page reload or application restart. Browser file selections themselves are intentionally not retained.
+Batch metadata, original uploads, generated images, copy files, hashes, revision history, and encrypted Drive credentials are stored durably in `HVAC_DATA_DIR`. Point that variable at a persistent volume in production and keep `FLASK_SECRET_KEY` stable; changing the secret intentionally makes existing Drive connections unreadable. Previous batches can be reopened from the UI after a page reload or application restart. Browser file selections themselves are intentionally not retained.
+
+## Google Drive setup and behavior
+
+1. In Google Cloud, enable the Google Drive API and create a **Web application** OAuth client.
+2. Add `http://127.0.0.1:5000/auth/callback` as a redirect URI for local use. Add the exact HTTPS value configured in `GOOGLE_REDIRECT_URI` for production.
+3. Configure the OAuth consent screen and add the Drive scope requested by the app.
+4. Start the app, click **Connect Google Drive**, approve access, and choose a writable folder from the searchable selector. **My Drive** and writable shared-drive folders are supported; a folder URL can also be pasted.
+
+Connections are isolated per signed browser session. Refresh tokens are encrypted at rest in SQLite, refreshed automatically, and revoked on disconnect. Before a paid generation starts, the app verifies that the selected folder still exists and accepts uploads. Each run creates a timestamped client folder with `Images/` and, for the full pipeline, `Videos/`. Stable private export keys make folder and file creation idempotent across rate limits, server errors, and ambiguous network timeouts.
+
+Generated images and copy are always saved to local durable storage before Drive upload. If Drive is temporarily unavailable, the run remains successful, every completed image and copy asset stays downloadable, and the UI reports which exports need attention.
+
+The built-in searchable folder browser currently requests the full `https://www.googleapis.com/auth/drive` scope so it can enumerate arbitrary existing folders and create output inside the selected one. Google classifies that as a restricted scope; a public production OAuth app may require verification and a security assessment. A future Google Picker migration can use narrower per-file access, but requires Picker-specific Cloud configuration.
+
+Run the automated suite with:
+
+```bash
+python -m pip install -r requirements-dev.txt
+python -m pytest -q
+```
 
 ## Batch revisions
 
@@ -91,5 +115,6 @@ agent/ad_templates.py   Named style templates; deterministic offer slot-filling
 agent/image_generator.py  gpt-image-2 edit calls (multi-reference, retries; auto-falls back to gpt-image-1 if the org lacks access — override with IMAGE_MODEL in .env)
 agent/copy_generator.py   Claude creative bundle (copy, scripts, B-roll prompts)
 agent/voice_generator.py  ElevenLabs TTS
-agent/drive_uploader.py   Drive OAuth uploads (files + native Google Docs)
+agent/drive_uploader.py   Encrypted per-browser OAuth, folder validation, retry-safe Drive exports
+agent/batch_store.py      SQLite batches, revisions, and encrypted Drive connection records
 ```

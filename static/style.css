@@ -68,6 +68,8 @@ h1 { font-size: 1.35rem; font-weight: 700; letter-spacing: -0.02em; }
 .chip-action:hover { color: var(--text); border-color: var(--faint); }
 .chip-action--primary { background: var(--accent); border-color: var(--accent); color: #fff; }
 .chip-action--primary:hover { background: var(--accent-hover); color: #fff; }
+.inline-form { display: inline; margin: 0; }
+.chip-action--button { background: transparent; cursor: pointer; font-family: inherit; }
 
 .flash {
   padding: 10px 14px; border-radius: 8px; font-size: 0.88rem; margin-bottom: 16px;

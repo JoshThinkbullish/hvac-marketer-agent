@@ -58,6 +58,15 @@ class BatchStore:
                 );
                 CREATE INDEX IF NOT EXISTS idx_revisions_batch
                     ON revisions(batch_id, created_at);
+
+                CREATE TABLE IF NOT EXISTS drive_connections (
+                    id TEXT PRIMARY KEY,
+                    credential_blob BLOB NOT NULL,
+                    account_email TEXT NOT NULL DEFAULT '',
+                    display_name TEXT NOT NULL DEFAULT '',
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
                 """
             )
 
@@ -172,6 +181,54 @@ class BatchStore:
                 "SELECT payload_json FROM revisions WHERE id=?", (revision_id,)
             ).fetchone()
         return json.loads(row["payload_json"]) if row else None
+
+    def save_drive_connection(self, connection_id: str, credential_blob: bytes,
+                              account_email: str = "",
+                              display_name: str = "") -> None:
+        """Persist an encrypted OAuth credential for one browser session."""
+        now = datetime.now(timezone.utc).isoformat()
+        with self._lock, self._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO drive_connections(
+                    id, credential_blob, account_email, display_name,
+                    created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?)
+                ON CONFLICT(id) DO UPDATE SET
+                    credential_blob=excluded.credential_blob,
+                    account_email=excluded.account_email,
+                    display_name=excluded.display_name,
+                    updated_at=excluded.updated_at
+                """,
+                (
+                    connection_id, credential_blob, account_email,
+                    display_name, now, now,
+                ),
+            )
+
+    def load_drive_connection(self, connection_id: str) -> dict[str, Any] | None:
+        with self._lock, self._connect() as conn:
+            row = conn.execute(
+                """
+                SELECT credential_blob, account_email, display_name,
+                       created_at, updated_at
+                FROM drive_connections WHERE id=?
+                """,
+                (connection_id,),
+            ).fetchone()
+        if not row:
+            return None
+        return {
+            "credential_blob": bytes(row["credential_blob"]),
+            "account_email": row["account_email"],
+            "display_name": row["display_name"],
+            "created_at": row["created_at"],
+            "updated_at": row["updated_at"],
+        }
+
+    def delete_drive_connection(self, connection_id: str) -> None:
+        with self._lock, self._connect() as conn:
+            conn.execute("DELETE FROM drive_connections WHERE id=?", (connection_id,))
 
     def prune(self, retention_days: int) -> int:
         """Remove expired database rows. Files are left for recoverability."""
