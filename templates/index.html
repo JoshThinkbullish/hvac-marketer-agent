@@ -676,7 +676,7 @@
           : `<div class="tile__ph ${meta.cls === 'is-working' ? 'tile__ph--pulse' : ''}"></div>`;
         const driveLink = item.drive_link
           ? `<a href="${esc(item.drive_link)}" target="_blank" class="tile__open">Drive ↗</a>` : '';
-        const downloadLink = item.local_image
+        const downloadLink = item.image_url
           ? `<a href="/api/jobs/${esc(job.id)}/image/${item.idx}" class="tile__download" title="Download full-resolution image" aria-label="Download image ${item.idx + 1}">↓</a>` : '';
         const refineBtn = canRefine
           ? `<label class="tile__select" title="Select image ${item.position || item.idx + 1}"><input type="checkbox" data-item-id="${esc(item.item_id)}" ${selectedItems.has(item.item_id) ? 'checked' : ''} /></label>` : '';
@@ -745,11 +745,18 @@
 
       const footer = $('runFooter');
       if (job.status !== 'running') {
+        const downloadableCount = job.items.filter(item => item.image_url).length;
+        const downloadAll = downloadableCount > 1
+          ? `<a class="btn btn--ghost btn--wide" href="/api/jobs/${esc(job.id)}/images.zip">Download all ${downloadableCount} images (.zip) ↓</a>`
+          : '';
+        const driveFolder = job.run_folder_link
+          ? `<a class="btn btn--primary btn--wide" href="${esc(job.run_folder_link)}" target="_blank">Open run folder in Drive ↗</a>`
+          : '';
         footer.hidden = false;
         footer.innerHTML = job.status === 'error'
-          ? `<div class="run__result run__result--err">✕ ${esc(job.error) || 'Run failed'}</div>`
+          ? `<div class="run__result run__result--err">✕ ${esc(job.error) || 'Run failed'}</div>${downloadAll}${driveFolder}`
           : `<div class="run__result">✓ ${done}/${total} images${job.copy.status === 'done' ? ' + copy assets' : ''} saved</div>`
-            + (job.run_folder_link ? `<a class="btn btn--primary btn--wide" href="${esc(job.run_folder_link)}" target="_blank">Open run folder in Drive ↗</a>` : '');
+            + downloadAll + driveFolder;
         rememberRun(job);
       } else footer.hidden = true;
     }
